@@ -1,0 +1,26 @@
+*.exe
+STATUS.md
+dist/
+node_modules/
+.env
+.vscode/
+*.log
+__pycache__/
+.pytest_cache/
+DESIGN.md
+logs/
+docs/
+diagrams/
+
+# SQLite runtime data (sessions/checkpoints)
+agent/data/
+
+# Java backend (backend)
+backend/target/
+*.tsbuildinfo
+backend/*.iml
+backend/.idea/
+backend/.classpath
+backend/.project
+backend/.settings/
+backend/logs/

@@ -1,0 +1,33 @@
+# prod 配置：使用 docker 服务名；llm 主密钥必须由 CD_LLM_ENCRYPTION_KEY 提供
+app:
+  server:
+    port: 8080
+    mode: prod
+  mysql:
+    host: mysql
+    port: 3306
+    user: root
+    password: root
+    database: cloud_drive
+  redis:
+    host: redis
+    port: 6379
+    password: ""
+  minio:
+    endpoint: minio:9000
+    access-key: minioadmin
+    secret-key: minioadmin
+    bucket: cloud-drive
+    use-ssl: false
+  agent:
+    base-url: http://agent:8000
+    response-header-timeout-sec: 60
+    max-concurrent: 20
+  llm:
+    encryption-key: ""
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

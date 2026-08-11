@@ -1,0 +1,25 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+PyYAML>=6.0,<7.0
+pydantic>=2.7,<3.0
+python-multipart==0.0.6
+httpx==0.26.0
+python-dotenv==1.0.1
+
+# LangGraph stack（仅用 langchain 系列；自研 Agent 框架已去掉 langgraph 依赖）
+langchain-openai>=0.2.0,<0.3.0
+langchain-anthropic>=1.0.0
+langchain-core>=0.3.0,<0.4.0
+
+# File parsing
+PyMuPDF==1.23.7
+python-docx==1.1.0
+
+# Vector search
+numpy>=1.24.0,<2.0.0
+sentence-transformers>=3.0.0
+jieba>=0.42.1,<1.0.0
+
+# Persistence
+redis==5.0.1
+qdrant-client>=1.11.0,<2.0.0

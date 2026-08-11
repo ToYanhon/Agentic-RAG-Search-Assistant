@@ -1,0 +1,45 @@
+spring:
+  profiles:
+    active: ${APP_MODE:dev}
+  application:
+    name: cloud-drive-ai-backend
+  datasource:
+    url: jdbc:mysql://${app.mysql.host}:${app.mysql.port}/${app.mysql.database}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${app.mysql.user}
+    password: ${app.mysql.password}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${app.redis.host}
+      port: ${app.redis.port}
+      password: ${app.redis.password:}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Shanghai
+  servlet:
+    multipart:
+      max-file-size: 51MB
+      max-request-size: 51MB
+  lifecycle:
+    timeout-per-shutdown-phase: 15s
+
+# 应用端口由 app.server.port 决定（dev/prod profile 各自定义；CD_SERVER_PORT 可覆盖）
+server:
+  port: ${app.server.port:8080}
+  shutdown: graceful
+
+# 应用专属配置（app.* 对齐 Go config.yaml）在 application-dev.yml / application-prod.yml 各自完整定义；
+# CD_<SECTION>_<FIELD> 环境变量由 CDEnvironmentPostProcessor 注入覆盖。
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    root: info
+    org.hibernate.SQL: warn

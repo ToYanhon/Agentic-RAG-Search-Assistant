@@ -1,0 +1,34 @@
+# dev 配置：本地服务（localhost / MinIO 9100），完整覆盖 app.*
+app:
+  server:
+    port: 8080
+    mode: dev
+  mysql:
+    host: localhost
+    port: 3306
+    user: root
+    password: root
+    database: cloud_drive
+  redis:
+    host: localhost
+    port: 6379
+    password: ""
+  minio:
+    endpoint: localhost:9100
+    access-key: minioadmin
+    secret-key: minioadmin
+    bucket: cloud-drive
+    use-ssl: false
+  jwt:
+    secret: change-me-in-production
+    expire-hours: 72
+  agent:
+    base-url: http://127.0.0.1:8000
+    response-header-timeout-sec: 60
+    max-concurrent: 20
+  upload:
+    direct-max-bytes: 52428800
+    chunk-max-bytes: 10485760
+    file-max-bytes: 10737418240
+  llm:
+    encryption-key: dev-only-llm-encryption-key-change-me-32b

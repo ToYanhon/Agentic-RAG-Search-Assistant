@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "description": "CloudDrive AI RAG 离线评估语料。合成项目文档与公开资料摘要混合，相关文件按 file_id 标注。",
+  "documents": [
+    {
+      "id": 1001,
+      "name": "项目架构与请求链路.md",
+      "source": "synthetic",
+      "text": "CloudDrive AI 采用 Java 主后端、Python Agent 和 React 前端三服务架构。Java 后端负责用户认证、文件元数据、对象存储、分享链接和 LLM 配置，Python Agent 负责对话编排、工具调用、语义索引和摘要，React 负责网盘界面与流式聊天。三个服务通过 Docker Compose 统一启动，开发环境后端监听 8080，Agent 监听 8000，前端 Vite 监听 5173，生产前端由 nginx 暴露 3000 端口。\n\n普通 REST 请求由前端的 api client 发送到 /api/v1，Agent 请求由 Java 的 AgentController 显式代理到 Python 路由。聊天响应使用 text/event-stream，Java 代理按块读取 Agent 返回的输入流并立即 flush，避免等待完整答案后才发送。代理层同时注入 X-User-Id、X-Request-Id 和用户的 X-LLM-* 配置，Agent 不直接暴露给公网。\n\n前端的公开分享访问使用 /s/:token，不依赖 JWT，并通过 VITE_BACKEND_ORIGIN 直连后端；其余受保护接口必须携带 Bearer token。服务之间的边界使文件业务和 Agent 编排可以独立演进，也让后端统一承担用户身份和敏感配置管理。"
+    },
+    {
+      "id": 1002,
+      "name": "认证与密钥安全方案.md",
+      "source": "synthetic",
+      "text": "系统采用两层认证。用户访问 Java 后端时使用 Authorization Bearer JWT，AuthFilter 校验签名、过期时间和黑名单；Java 后端访问 Python Agent 时另外注入 X-Agent-Token，Agent 调用文件接口时也携带同一个内部 token。AgentTokenManager 将轮换后的 token 写入 Redis 键 internal:agent:token，Python 侧从同一键读取并缓存，遇到 401 会强制刷新后重试。内部密钥轮换方案编号为 SEC-9K42，用于测试 token 过期和重试路径。\n\n用户配置的 LLM API key 存在 llm_configs 表中，但数据库不保存明文。LLMConfigService 使用 AES-GCM 加密和主密钥解密，AgentController 根据 X-LLM-Provider 解析对应供应商，再注入 X-LLM-Base-URL、X-LLM-Key、X-LLM-Model。Tavily 密钥单独通过 X-Tavily-Key 传递。请求级配置使用 contextvar 保存，请求结束必须 reset，避免不同用户之间发生配置串扰。\n\nAgent 没有面向公网的独立身份认证，它信任 Java 代理注入的 X-User-Id。因此 Docker Compose 只把 8000 绑定到 127.0.0.1，不能把 Agent 端口直接暴露到公网，否则攻击者可以伪造任意用户身份。"
+    },
+    {
+      "id": 1003,
+      "name": "对象存储与上传设计.md",
+      "source": "synthetic",
+      "text": "文件内容存放在 MinIO S3 兼容对象存储，Java 侧使用 AWS SDK v2 S3Client 和 path-style 寻址。普通直传限制为 50MB，分块上传每块 10MB，单文件上限为 10GB。MultipartController 负责初始化 upload、接收 part、记录 ETag，并在全部分块完成后调用 S3 complete multipart。大文件测试会使用上传会话标识 MPU-8R13 检查分块重试是否幂等。\n\n秒传只在同一个 owner 内按 MD5 查找已有文件，避免把一个用户的文件对象错误复用给另一个用户。命中秒传时不重新上传内容，而是使用 MinioStorage.copyObject 复制到新 object key，再创建新的文件元数据。跨用户不能通过全局 MD5 直接复用对象。\n\n文件删除包括数据库记录、对象存储对象和 Agent 索引三个部分。文件服务删除记录后通过 AgentNotifier 异步调用取消索引，文件夹级联删除也必须为每个后代文件发送取消索引通知。通知是尽力而为，但删除逻辑不能省略，否则已经删除的内容仍可能出现在语义检索结果中。"
+    },
+    {
+      "id": 1004,
+      "name": "文件 RAG 检索方案.md",
+      "source": "synthetic",
+      "text": "文件索引首先从 txt、PDF 和 docx 提取文本，然后将文本切分为带少量重叠的句子块。每个 chunk 使用 paraphrase-multilingual-MiniLM-L12-v2 生成 384 维归一化向量，写入 Qdrant 的 kb collection。稠密向量使用 HNSW 做近似最近邻召回，并用 user_id payload filter 隔离不同用户的文件。索引构建批次编号 IDX-93P7，用于离线评估增量重建。\n\n为了补充纯语义召回对专有名词、版本号和编号匹配不稳定的问题，索引同时生成 jieba 稀疏词频向量。Qdrant 对 sparse vector 使用 IDF modifier，查询时分别执行 dense 和 sparse 两路召回，再用 Reciprocal Rank Fusion 合并候选。融合后的候选继续交给 cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 精排，最后使用绝对分数和最高分比例组成的双门控过滤噪声结果。当前检索链路版本标记为 RAG-V2-2026。\n\n检索结果只返回文件 ID、chunk 内容、序号和语义类型。文件被删除或用户主动取消索引时，按 user_id 和 file_id 删除 Qdrant 中的全部点。这样可以同时处理语义改写、精确关键词和多租户隔离，并保证索引状态与文件生命周期一致。"
+    },
+    {
+      "id": 1005,
+      "name": "Agent 工作流设计.md",
+      "source": "synthetic",
+      "text": "AgentWorkflow.turn 使用一个异步生成器编排完整对话回合。开始阶段加载历史消息、长期记忆和触发的技能，随后构建上下文并调用 supervisor。Supervisor 不直接执行文件或联网工具，而是通过 transfer_to_file、transfer_to_web、transfer_to_general 将任务交给能力边界明确的 worker。\n\nWorker 使用 ReAct 循环，每轮让 LLM 判断是否需要调用工具；工具执行结果以 ToolMessage 追加到上下文，最多循环 6 轮以防止失控。file worker 可以组合 search_files、semantic_search、read_file_content、summarize_file 和 get_file_info，例如先按语义搜索找到候选，再读取文件核对原文，最后生成摘要。general worker 额外拥有记忆工具和全局技能工具。\n\nSupervisor 和 worker 的工具名由代码注册表运行时注入提示词，工具 schema 负责描述参数和语义。提示词集中在 app/prompt/prompts.py，避免在多份系统提示词中手写工具枚举。每个回合结束后持久化消息，并在后台提炼长期记忆，再发送 meta 和 done 事件。"
+    },
+    {
+      "id": 1006,
+      "name": "技能系统安全边界.md",
+      "source": "synthetic",
+      "text": "全局技能位于 agent/skills，支持目录式技能和扁平 Markdown 技能。目录式技能包含 SKILL.md，可选 tools.py；其中通过 @tool 或 @safe_tool 注册的工具会进入 general worker，只有随部署分发并经过代码评审的 admin 技能才被视为可信。扁平式技能只有指令文本，不加载任何代码。\n\n用户技能来自用户网盘根目录的 skills 文件夹，只允许使用 Markdown 指令。user_loader 会根据 user_id 拉取文件，registry 只把匹配的指令注入当前会话，永远不会 import 用户上传的 Python 文件。这个边界避免用户通过网盘文件获得任意代码执行能力，也让全局工具和用户提示词具有不同的信任级别。\n\n全局技能启动时扫描并注册，watcher 按配置间隔检查文件变化并热更新；下划线前缀目录，例如 _template，被视为模板或隐藏技能，不参与加载。单个技能和每轮技能上下文都有字节预算，防止恶意文件导致 prompt 膨胀。"
+    },
+    {
+      "id": 1007,
+      "name": "记忆与会话持久化.md",
+      "source": "synthetic",
+      "text": "会话消息和长期记忆采用 SQLite 主存储与 Redis 缓存组合。长期记忆写入时同步更新 Redis 和 SQLite，Redis 负责快速读取和容量淘汰，SQLite 负责落盘；当 Redis 中没有用户记忆但 SQLite 有记录时，服务会惰性恢复缓存。会话消息完整保存在 SQLite，Redis 只缓存聊天首读所需的最近消息。\n\n用户说出偏好、身份或习惯时，general worker 可以调用 save_memory。memory_service 会先进行关键词和 embedding 语义去重，避免同一事实以不同表达重复写入；forget_memory 根据用户明确的遗忘请求删除匹配事实。记忆上下文在每轮 worker 提示词中注入，但受上下文预算限制。\n\nSQLite 数据库路径由 DB_PATH 配置，测试使用临时目录避免污染开发数据。真实 Redis 测试验证双写、缓存恢复、容量上限和遗忘流程，普通 Agent 单元测试则使用 mock，不依赖外部服务。"
+    },
+    {
+      "id": 1008,
+      "name": "测试与部署手册.md",
+      "source": "synthetic",
+      "text": "本地基础设施由 Docker Compose 提供，包括 MySQL 8、Redis 7、MinIO 和 Qdrant。MinIO 容器的 API 映射到宿主机 9100，控制台映射到 9101；Qdrant REST 端口是 6333。Java 后端 dev profile 使用 localhost，生产 profile 使用 mysql、redis、minio:9000 和 agent:8000 等 Docker 服务名。CI 评估任务编号为 CI-2026-041，用于区分依赖基础设施的链路测试和 mock 单元测试。\n\nJava 后端使用 Maven，mvn test 依赖 H2 内存数据库，不要求启动 MySQL、Redis 或 MinIO；单个文件域测试可以使用 mvn test -Dtest=FileServiceTest。Agent 使用 pytest test/ 运行 mock 单元测试，test_memory.py、test_search.py 和 test_chain.py 是需要显式 python 执行的真实链路脚本。前端 npm run build 等价于 tsc -b && vite build。\n\n打包后端前要停止正在运行的 jar，因为 Windows 会锁定 target/backend-0.1.0.jar。启动验证使用后台 Start-Process 启动 Java，再轮询 /health，不要在终端前台阻塞等待。生产环境的 LLM 加密主密钥必须通过 CD_LLM_ENCRYPTION_KEY 提供。"
+    },
+    {
+      "id": 1009,
+      "name": "文件智能检索产品需求.md",
+      "source": "synthetic",
+      "text": "产品面向需要管理个人资料、技术文档和项目文件的用户。用户可以创建文件夹、上传文件、搜索文件名、为文件建立语义索引，并在聊天页面询问文件内容。文件名搜索适合定位明确名称，语义搜索适合理解自然语言问题，两者可以由 Agent 根据任务选择。\n\n用户输入例如“找出上季度华东销售报告并概括风险”时，Agent 先通过文件工具定位候选，再读取或总结文件；输入“我的存储空间还剩多少”时，Agent 调用存储用量工具而不是检索文档。公开分享链接使用随机 token，访问者无需登录即可查看允许公开的元数据和下载内容，但不能访问用户的私有 Agent 会话。\n\n系统的核心体验是流式回答和可追踪的工具过程。前端解析 SSE 事件中的 token、tool_start、tool_end、route、meta 和 done，用户可以看到 Agent 正在使用哪个能力域。错误场景返回结构化错误，不把后端堆栈暴露给用户。"
+    },
+    {
+      "id": 1010,
+      "name": "性能与可靠性复盘.md",
+      "source": "synthetic",
+      "text": "文件夹批量建索引时使用并发信号量，最多同时处理 4 个文件，并限制单次请求最多索引 100 个文件。Qdrant upsert 按 128 个点分批写入，避免一次请求携带过大的 payload。Embedding 和 Cross-Encoder 模型采用异步锁懒加载，并把 CPU 推理放到 executor，避免阻塞 FastAPI 事件循环。\n\nJava AgentClient 使用 HTTP/1.1 访问明文 Agent，避免 Java HttpClient 默认 HTTP/2 触发 h2c upgrade。代理会跳过 host、connection、upgrade、content-length 和 expect 等受限或 hop-by-hop 头。Agent 并发超过上限返回 503，代理连接失败返回 502，SSE 流关闭时在 finally 中释放并发许可。\n\n向量搜索先取 rerank_candidates 个粗排候选，再交给 Cross-Encoder 精排，默认返回 top_k 个结果。重排失败时退回 ANN 结果，单个工具失败转换成错误字符串交给 LLM 决策，不让一个外部依赖异常中断整轮 Agent。"
+    },
+    {
+      "id": 1011,
+      "name": "云计算公开资料摘要.md",
+      "source": "public-summary",
+      "source_url": "https://zh.wikipedia.org/wiki/云计算",
+      "text": "云计算是一种基于互联网提供计算资源、存储资源和应用服务的方式。用户通常通过浏览器、桌面程序或移动应用访问服务，不需要直接控制服务提供者背后的服务器和基础设施。资源可以按需申请、扩容和释放，服务提供者通过资源池为多个用户提供服务。\n\n常见服务模式包括软件即服务、平台即服务和基础设施即服务。软件即服务让用户直接使用应用，平台即服务提供应用运行环境，基础设施即服务提供计算、存储和网络等基础资源。部署方式可以是公有云、私有云、社群云或混合云。\n\n云计算的典型特征包括按需自助服务、网络访问、资源池化、快速弹性和可计量服务。多租户共享资源有利于提高利用率，但也带来访问控制、数据隔离、隐私保护和供应商依赖等问题。"
+    },
+    {
+      "id": 1012,
+      "name": "向量数据库公开资料摘要.md",
+      "source": "public-summary",
+      "source_url": "https://zh.wikipedia.org/wiki/向量数据库",
+      "text": "向量数据库用于存储和检索由文本、图像或其他对象编码得到的高维向量。查询通常把输入转换为向量，再依据距离或相似度返回近邻对象，因此适合语义搜索、推荐、相似图片查找和检索增强生成。\n\n当数据量较大时，系统会使用近似最近邻算法降低全量比较成本。HNSW 是一种基于分层图的近似最近邻索引，通过在多层图中逐步缩小搜索范围来提高查询速度。向量数据库通常还会保存 payload 或 metadata，并在相似度检索前后使用属性过滤，以实现按用户、类别或时间的范围约束。\n\n向量检索的效果取决于编码模型、距离函数、索引参数、数据分块和查询分布。工程系统经常组合稠密向量、稀疏关键词和重排序模型，以兼顾语义相关性与精确词匹配。"
+    },
+    {
+      "id": 1013,
+      "name": "信息检索公开资料摘要.md",
+      "source": "public-summary",
+      "source_url": "https://zh.wikipedia.org/wiki/信息检索",
+      "text": "信息检索研究如何从文档集合中找到与用户需求相关的内容。传统检索系统通常建立倒排索引，把词项映射到包含该词的文档，再依据词频、文档频率和字段权重计算相关性。查询结果的质量需要在召回率和精确率之间平衡。\n\nBM25 是常见的概率检索模型，它综合词项在文档中的出现频率、词项在整个集合中的稀有程度和文档长度。稀有词通常比常见词具有更强区分能力。对于包含产品型号、错误码、专有名词的查询，关键词检索往往比单纯的语义向量更可靠。\n\n现代检索系统可以把关键词检索与向量检索结合，先使用多路召回获得候选，再使用学习排序模型重新排列。Recall@k 表示前 k 个结果覆盖相关文档的比例，MRR 则关注第一个相关结果出现的位置，二者常用于离线评估检索方案。"
+    },
+    {
+      "id": 1014,
+      "name": "机器学习公开资料摘要.md",
+      "source": "public-summary",
+      "source_url": "https://zh.wikipedia.org/wiki/机器学习",
+      "text": "机器学习是让计算机利用数据和经验改进任务表现的方法。监督学习使用带标签样本学习输入到输出的映射，分类和回归是常见任务；无监督学习在没有目标标签的情况下寻找数据结构，例如聚类和降维；强化学习则通过环境反馈和奖励学习策略。\n\n模型训练需要关注数据表示、损失函数、优化算法和泛化能力。训练集上的效果不能代表模型对未见数据的表现，因此通常要划分验证集和测试集。过拟合表现为模型记住训练样本的细节，却无法处理分布相近但未出现的新样本。\n\n文本表示可以把词、句子或文档映射成数值向量。相似度、分类器和排序模型都可以建立在这种表示上。数据质量、标签一致性和评估指标会直接影响工程结论，单一指标不能完整描述系统能力。"
+    },
+    {
+      "id": 1015,
+      "name": "分布式计算公开资料摘要.md",
+      "source": "public-summary",
+      "source_url": "https://zh.wikipedia.org/wiki/分布式计算",
+      "text": "分布式计算把任务拆分到多个通过网络连接的计算节点上执行。节点可以并行处理不同子任务，再通过消息或共享存储交换中间结果。与单机程序相比，分布式系统需要额外处理网络延迟、节点故障、数据复制、负载不均和部分失败。\n\n系统设计通常在一致性、可用性和分区容错之间做取舍。服务可以通过超时、重试、幂等操作、限流和熔断降低局部故障的影响。数据分片和副本有助于扩展容量与吞吐，但会增加路由、恢复和一致性管理的复杂度。\n\n一个可靠的分布式服务还需要监控请求延迟、错误率、队列长度和资源使用情况。异步消息、批量处理和缓存能够改善吞吐，然而过度缓存可能带来陈旧数据，重试也可能在下游故障时形成流量放大。"
+    }
+  ],
+  "queries": [
+    {"id": "exact-01", "type": "exact", "query": "Java HttpClient 为什么要使用 HTTP_1_1", "relevant_files": [1001, 1010]},
+    {"id": "exact-02", "type": "exact", "query": "internal:agent:token 存在哪个 Redis 键", "relevant_files": [1002]},
+    {"id": "exact-03", "type": "exact", "query": "用户 LLM 密钥使用什么算法加密", "relevant_files": [1002]},
+    {"id": "exact-04", "type": "exact", "query": "直传文件的大小上限是多少", "relevant_files": [1003]},
+    {"id": "exact-05", "type": "exact", "query": "分块上传每个 part 是多少 MB", "relevant_files": [1003]},
+    {"id": "exact-06", "type": "exact", "query": "Qdrant 的 embedding 是多少维", "relevant_files": [1004]},
+    {"id": "exact-07", "type": "exact", "query": "Cross Encoder 模型名称是什么", "relevant_files": [1004]},
+    {"id": "exact-08", "type": "exact", "query": "Agent 最多循环多少轮工具调用", "relevant_files": [1005]},
+    {"id": "exact-09", "type": "exact", "query": "用户技能允许上传 Python 工具吗", "relevant_files": [1006]},
+    {"id": "exact-10", "type": "exact", "query": "MinIO API 映射到宿主机哪个端口", "relevant_files": [1008]},
+    {"id": "exact-11", "type": "exact", "query": "Qdrant 使用的 ANN 索引名称是什么", "relevant_files": [1004, 1012]},
+    {"id": "exact-12", "type": "exact", "query": "BM25 主要利用哪些词项信息", "relevant_files": [1013]},
+    {"id": "exact-13", "type": "exact", "query": "SEC-9K42 对应哪项安全测试", "relevant_files": [1002]},
+    {"id": "exact-14", "type": "exact", "query": "上传会话标识 MPU-8R13 用来检查什么", "relevant_files": [1003]},
+    {"id": "exact-15", "type": "exact", "query": "索引构建批次 IDX-93P7 属于哪个模块", "relevant_files": [1004]},
+    {"id": "exact-16", "type": "exact", "query": "当前检索链路版本 RAG-V2-2026", "relevant_files": [1004]},
+    {"id": "exact-17", "type": "exact", "query": "CI-2026-041 区分哪两类测试", "relevant_files": [1008]},
+    {"id": "semantic-01", "type": "semantic", "query": "怎样防止删掉的资料还被聊天机器人搜出来", "relevant_files": [1003, 1004]},
+    {"id": "semantic-02", "type": "semantic", "query": "大模型供应商的 secret 怎么避免明文落库", "relevant_files": [1002]},
+    {"id": "semantic-03", "type": "semantic", "query": "超大文件上传时系统如何拆分和合并", "relevant_files": [1003]},
+    {"id": "semantic-04", "type": "semantic", "query": "对话机器人怎么决定交给文件能力还是联网能力", "relevant_files": [1005]},
+    {"id": "semantic-05", "type": "semantic", "query": "为什么普通用户上传的技能不能直接运行代码", "relevant_files": [1006]},
+    {"id": "semantic-06", "type": "semantic", "query": "缓存里的长期记忆丢了以后如何恢复", "relevant_files": [1007]},
+    {"id": "semantic-07", "type": "semantic", "query": "不启动数据库能不能跑后端测试", "relevant_files": [1008]},
+    {"id": "semantic-08", "type": "semantic", "query": "文件内容搜索怎样同时理解意思和匹配型号", "relevant_files": [1004, 1013]},
+    {"id": "semantic-09", "type": "semantic", "query": "网盘问答页面为什么能边生成边显示", "relevant_files": [1001, 1009]},
+    {"id": "semantic-10", "type": "semantic", "query": "云服务为什么可以临时扩容再释放资源", "relevant_files": [1011]},
+    {"id": "semantic-11", "type": "semantic", "query": "向量数据库为什么不需要比较所有向量", "relevant_files": [1012]},
+    {"id": "semantic-12", "type": "semantic", "query": "离线检索指标为什么要看第一个相关结果的位置", "relevant_files": [1013]},
+    {"id": "semantic-13", "type": "semantic", "query": "模型在训练数据上很好但新数据变差叫什么", "relevant_files": [1014]},
+    {"id": "semantic-14", "type": "semantic", "query": "多台机器协作时最容易出现哪些故障", "relevant_files": [1015]},
+    {"id": "multi-01", "type": "multi-hop", "query": "一次文件问答请求从网页到 Agent 再到向量库会经过哪些服务", "relevant_files": [1001, 1004, 1005]},
+    {"id": "multi-02", "type": "multi-hop", "query": "用户上传并询问一个 PDF 时，内容如何进入检索链路", "relevant_files": [1003, 1004, 1009]},
+    {"id": "multi-03", "type": "multi-hop", "query": "删除文件后数据库、对象存储和向量索引分别如何处理", "relevant_files": [1003, 1004]},
+    {"id": "multi-04", "type": "multi-hop", "query": "Agent 调用文件工具时，用户身份和内部 token 如何共同保证安全", "relevant_files": [1002, 1005]},
+    {"id": "multi-05", "type": "multi-hop", "query": "为什么文件检索需要先召回再用 Cross Encoder 排序", "relevant_files": [1004, 1012, 1013]},
+    {"id": "multi-06", "type": "multi-hop", "query": "怎样同时解决中文语义改写和产品编号精确匹配", "relevant_files": [1004, 1013]},
+    {"id": "multi-07", "type": "multi-hop", "query": "一次 Agent 回合如何加载记忆、选择工具并保存新消息", "relevant_files": [1005, 1007]},
+    {"id": "multi-08", "type": "multi-hop", "query": "批量建索引如何控制并发、写入批次和事件循环阻塞", "relevant_files": [1008, 1010]},
+    {"id": "multi-09", "type": "multi-hop", "query": "云计算的资源池思想和多租户文件服务有什么相似之处", "relevant_files": [1009, 1011]},
+    {"id": "multi-10", "type": "multi-hop", "query": "如何用 Recall 和 MRR 判断混合检索是否比单路检索更好", "relevant_files": [1004, 1013]},
+    {"id": "multi-11", "type": "multi-hop", "query": "一个可靠的多服务 Agent 系统需要哪些超时重试和限流措施", "relevant_files": [1001, 1010, 1015]},
+    {"id": "multi-12", "type": "multi-hop", "query": "如果 Redis 短暂不可用，用户的长期偏好和会话消息还能否恢复", "relevant_files": [1007, 1010]},
+    {"id": "multi-13", "type": "multi-hop", "query": "公开分享为什么不需要登录但私有 Agent 会话仍然需要认证", "relevant_files": [1001, 1009]},
+    {"id": "multi-14", "type": "multi-hop", "query": "技能热加载和用户代码隔离分别解决什么问题", "relevant_files": [1006, 1005]},
+    {"id": "multi-15", "type": "multi-hop", "query": "如何在多个检索节点出现延迟和失败时保持服务可用", "relevant_files": [1010, 1015]}
+  ]
+}
