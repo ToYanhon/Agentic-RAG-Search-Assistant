@@ -1,6 +1,14 @@
-# CloudDrive AI · Agentic RAG 文件智能检索系统
+# CloudDrive AI · 让网盘变得"能问"
 
-AI 云盘：三服务架构的智能文件检索问答系统。Java 主服务负责认证、对象存储与请求代理，Python Agent 负责工具编排与文件检索，React 提供网盘界面与流式对话。
+三服务 AI 云盘：Java 主服务负责认证、对象存储与请求代理，Python Agent 负责工具编排与文件检索，React 提供网盘与流式对话界面。核心能力是 Agent 编排与混合检索 RAG——文件不只是存起来，还能被检索、被阅读、被回答。
+
+## 特性与设计取舍
+
+- **Agent 编排（无 LangGraph 依赖）**：Supervisor 按能力域路由到 file / web / general 三个 worker，执行 ReAct 多轮工具调用；工具名与 schema 由注册表运行时注入提示词，避免提示词与实现漂移。不引入 LangGraph 是为了减少对框架状态机的依赖，让回合控制流（单 async generator）和失败处理完全可读。
+- **混合检索 RAG**：本地 embedding 稠密向量 + jieba BM25 风格稀疏向量双路召回，RRF 按名次融合，再经 Cross-Encoder 精排与双门控过滤低相关结果。两路分数含义与尺度不同，直接加权会互相干扰，RRF 只看相对名次所以天然免疫尺度问题。
+- **多服务边界与安全**：JWT + 内部 agent token 轮换双认证；用户 LLM 密钥 AES-GCM 加密落库，按请求解密后注入，前端不落明文；Java 代理层做 SSE 流式透传与并发限流。把业务域和 Agent 拆成两个服务，是为了让认证、存储与模型编排独立演进，敏感配置不需要下沉到 Agent。
+- **检索一致性**：Qdrant 以 `user_id` payload 隔离多租户；文件删除由后端异步通知 Agent 级联取消索引，避免已删内容继续被检索。
+- **可验证**：后端 JUnit、Agent pytest 全部离线可跑；自建中文检索评估集（精确匹配 / 语义改写 / 跨段三类），按 Recall@k / MRR 对比分块、精排与混合检索方案（【实测数据待补充】）。
 
 ## 架构
 
@@ -17,59 +25,46 @@ agent    (Python 3.12 / FastAPI, :8000，仅绑定 127.0.0.1)
 MySQL（元数据）· Redis（缓存/认证/记忆）· MinIO（文件对象）· Qdrant（检索索引）
 ```
 
-- `backend/` — Spring Boot：认证（JWT + agent token 轮换双认证）、文件域（秒传 / 分块上传 / 文件夹 / 分享）、LLM 配置（AES-GCM 加密）、Agent 代理层（SSE 透传 + 限流）。
-- `agent/` — FastAPI：自研 Agent 编排框架（无 LangGraph 依赖），Supervisor→Worker（file/web/general）ReAct 多轮工具调用；技能体系（全局可执行工具 + 用户只读指令）；混合 RAG 检索。
-- `frontend/` — React 18 + TS + Vite：网盘管理、流式聊天 Copilot、公开分享页。
-
 ## 快速开始
-
-基础设施：
 
 ```bash
 docker compose up -d mysql redis minio qdrant
 ```
 
-后端（`backend/`）：
-
 ```bash
-mvn spring-boot:run        # dev，默认 127.0.0.1:8080
-mvn test                   # JUnit，H2 内存库，无需基础设施
+# backend/
+mvn spring-boot:run            # dev，默认 127.0.0.1:8080
+mvn test                       # JUnit，H2 内存库，无需基础设施
 ```
 
-Agent（`agent/`）：
-
 ```bash
-copy .env.example .env     # 填入 LLM 密钥 / REDIS_URL / BACKEND_URL / QDRANT_URL
+# agent/
+copy .env.example .env         # 填 LLM 密钥 / REDIS_URL / BACKEND_URL / QDRANT_URL
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
-pytest test/               # 全部 mock，无需基础设施
+pytest test/                   # 全部 mock，无需基础设施
 ```
-
-前端（`frontend/`）：
 
 ```bash
+# frontend/
 npm install
-npm run dev                # 127.0.0.1:5173，/api 代理到 8080
+npm run dev                    # 127.0.0.1:5173，/api 代理到 8080
 ```
 
-## 配置
+## 测试与评估
 
-- `APP_MODE` 选择 dev / prod profile（dev 用 localhost，prod 用 docker 服务名）。
-- 任意字段可用 `CD_<SECTION>_<FIELD>` 覆盖；prod 必须通过 `CD_LLM_ENCRYPTION_KEY` 提供 LLM 配置主密钥（≥32 字节）。
+```bash
+python -u test/eval_rag.py --top-k 5     # agent/ 下，需 Qdrant；默认只测召回阶段
+python -u test/eval_rag.py --with-rerank # 加跑 Cross-Encoder 终排，耗时更长
+```
 
-## RAG 检索链路
+## 已知边界 / 后续计划
 
-文件索引：提取文本（txt/pdf/docx）→ 句子分块（重叠窗口）→ 稠密向量（本地 embedding）+ 稀疏向量（jieba 词频）写入 Qdrant `kb`（`user_id` payload 隔离）。
-
-查询链路：`semantic_search` 工具 → 稠密 + 稀疏双路召回 → RRF 融合 → Cross-Encoder 精排 → 双门控（绝对 + 相对阈值）→ Agent 决定继续阅读 / 摘要 / 回答。
-
-一致性：文件删除由 Java 异步通知 Agent 级联取消索引，保证“已删即不可检索”。
-
-离线评估：`python -u test/eval_rag.py --top-k 5`（需 Qdrant），按 Recall@k / MRR 对比分块、精排与混合检索方案；结果写入 `data/eval_results.json`（gitignored）。
+- 删除后的索引清理是异步尽力而为，删除接口成功不代表 Qdrant 已清理；强一致需要 tombstone 或删除状态，尚未实现。
+- 检索评估集的数字尚未写入文档，待实测后补充。
+- 暂无 Query 改写（HyDE / step-back）与多模态索引，扩展点在文本提取注册表中已预留。
 
 ## 文档
 
-- `AGENTS.md` — 开发约定与避坑（新代码务必先读）。
+- `AGENTS.md` — 开发约定、命令与避坑（改代码前先读）。
 - `backend/README.md` — 后端迁移说明与进度。
-- `docs/`（gitignored）— 简历、面试拷问与答案、项目总结。
-- `diagrams/`（gitignored）— 架构与 RAG 流程 Draw.io 图。
