@@ -1,6 +1,6 @@
 # AGENTS.md
 
-CloudDrive AI = AI 云盘。三个服务由 `docker-compose.yml` 串联（backend → agent 代理转发，frontend → backend `/api/v1`）。代码注释与文档均为中文，新增内容请保持同风格。**Go 后端已删除，Java 是唯一后端**（backend 无 `.go` 文件）。注意：本目录 `.git` 已损坏、`git` 命令不可用，别依赖 git 历史。
+Agentic-RAG-Search-Assistant = AI 云盘。三个服务由 `docker-compose.yml` 串联（backend → agent 代理转发，frontend → backend `/api/v1`）。代码注释与文档均为中文，新增内容请保持同风格。**Go 后端已删除，Java 是唯一后端**（backend 无 `.go` 文件）。注意：本目录 `.git` 已损坏、`git` 命令不可用，别依赖 git 历史。
 
 ## 目录结构
 - `backend/` — Spring Boot 3.3 + Java 21 + Maven + MySQL/Redis/MinIO。入口 `com.clouddrive.CloudDriveApplication`（`src/main/java/com/clouddrive/`）。分层：`controller`（REST）→ `service` → `repository`（Spring Data JPA）→ `entity`；另有 `proxy/`（`AgentClient.java` 把全部 `/api/v1/agent/*` 代理给 Python agent，SSE 透传）、`storage/`（`MinioStorage.java`，AWS SDK v2 S3Client）、`security/`（JWT+双认证+agent token 轮换）、`common/`（Resp 信封/错误码）、`config/`（`AppProperties` + `CD_` 覆盖）。

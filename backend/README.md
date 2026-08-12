@@ -1,4 +1,4 @@
-# CloudDrive AI 后端（Java/Spring Boot 迁移版）
+# Agentic-RAG-Search-Assistant 后端（Java/Spring Boot 迁移版）
 
 原 Go 后端（`../backend/`）的 Java/Spring Boot 迁移实现，**契约 1:1 对齐**：响应信封、错误码、
 JWT/双认证、`/s/:token`、秒传 owner 语义、删除即取消索引、`X-Agent-Token` 轮换等全部保持，

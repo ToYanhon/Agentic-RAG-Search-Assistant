@@ -1,4 +1,4 @@
-# CloudDrive AI · 让网盘变得"能问"
+# Agentic-RAG-Search-Assistant · 让网盘变得"能问"
 
 三服务 AI 云盘：Java 主服务负责认证、对象存储与请求代理，Python Agent 负责工具编排与文件检索，React 提供网盘与流式对话界面。核心能力是 Agent 编排与混合检索 RAG——文件不只是存起来，还能被检索、被阅读、被回答。
 
