@@ -66,11 +66,12 @@ def test_build_worker_prompt_injects_tool_names():
     assert "get_storage_usage" in build_worker_prompt("general")
 
 
-def test_build_worker_prompt_injects_time_memories_skills():
+def test_build_worker_prompt_injects_memories_skills_no_time():
     s = build_worker_prompt("general", ["偏好英文文档"], "### 技能：简历分析\n正文")
     for sec in _SECTIONS:
         assert sec in s
-    assert "## 当前时间" in s
+    # 时间已移出 system prompt（保证前缀稳定命中 provider 上下文缓存）
+    assert "## 当前时间" not in s
     assert "## 关于用户" in s
     assert "偏好英文文档" in s
     assert "技能：简历分析" in s

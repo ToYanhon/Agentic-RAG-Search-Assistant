@@ -9,9 +9,10 @@
 - **多服务边界与安全**：JWT + 内部 agent token 轮换双认证；`AuthFilter` 区分调用方角色（JWT→user / X-Agent-Token→agent），写内容接口仅 agent 可用；用户 LLM 密钥 AES-GCM 加密落库，按请求解密后注入，前端不落明文；Java 代理层做 SSE 流式透传与并发限流。把业务域和 Agent 拆成两个服务，是为了让认证、存储与模型编排独立演进，敏感配置不需要下沉到 Agent。
 - **检索一致性**：Qdrant 以 `user_id` payload 隔离多租户；文件删除与内容覆盖写由后端异步通知 Agent 维护向量索引——通知走 Redis 队列（`task:index_notify`），轮询消费 + 指数退避重试，Redis 不可用回退直发，避免已删/已改内容继续被检索。
 - **可验证**：后端 JUnit、Agent pytest 全部离线可跑；自建中文检索评估集（精确匹配 / 语义改写 / 跨段三类），按 Recall@k / MRR 对比分块、精排与混合检索方案（【实测数据待补充】）。
-- **多格式索引**：txt / PDF / docx 原生解析，xlsx / xls / pptx / ppt / csv / html 与 jpg / jpeg / png 图片经 MarkItDown 转 Markdown 文本进入同一向量链路；图片可选用用户配置的视觉 LLM 生成中文描述（OpenAI 兼容 provider），无视觉能力时自动跳过。
-- **Agent 工具**：file / web / general 三组（工具名与 schema 由注册表运行时注入，防漂移）。读文件支持按行 offset/limit + 非文本 MarkItDown 回退；写/编辑（`write_file_content` / `edit_file_content`）owner 限定、走 agent-only 接口。
+- **多格式索引**：txt / PDF / docx 原生解析，xlsx / xls / pptx / ppt / csv / html 与 jpg / jpeg / png 图片经 MarkItDown 转 Markdown 文本进入同一向量链路；图片可选用用户配置的视觉 LLM 生成中文描述（OpenAI 兼容 provider），无视觉能力时自动跳过。代码 / 配置文件（py / js / ts / go / java / c / cc / cpp / h / hpp / css / json / xml 等）按纯文本接入同一链路，可被语义检索、按行读取、文本预览。
+- **Agent 工具**：file / web / general 三组（工具名与 schema 由注册表运行时注入，防漂移）。读文件支持按行 offset/limit + 非文本 MarkItDown 回退；创建/覆盖/编辑（`create_file` / `write_file_content` / `edit_file_content`）owner 限定、走 agent-only 接口，file 与 general 均可见；worker 已给出文本答复后 supervisor 收尾去重，避免重复输出。
 - **后台任务骨架**：进程内「尽力而为」任务统一重试语义（`bg_tasks`：`run_bg` / `await_with_retry`），记忆提炼与消息持久化失败可重试。
+- **上下文缓存**：worker/supervisor system prompt 不注入当前时间（时间附加到本轮 user 消息末尾），保证多轮前缀稳定命中 provider 自动上下文缓存（DeepSeek 默认开启）；按缓存命中分价计费并展示；长会话始终保留最近 N 轮（`CONTEXT_KEEP_TURNS`，默认 10），更早折叠进滚动摘要。
 
 ## 架构
 

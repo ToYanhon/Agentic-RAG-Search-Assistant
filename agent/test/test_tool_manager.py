@@ -22,10 +22,12 @@ def test_worker_subsets(tm):
     assert "get_storage_usage" in general
     assert "write_file_content" in general
     assert "edit_file_content" in general
+    assert "create_file" in general
     assert "search_files" not in general
     assert "web_search" not in file
-    assert "write_file_content" not in file
-    assert "edit_file_content" not in file
+    # 写工具 file 与 general 都可见（创建/编辑/覆盖文本文件属文件操作）
+    for name in ["create_file", "write_file_content", "edit_file_content"]:
+        assert name in file
 
 
 def test_get_known_and_unknown(tm):

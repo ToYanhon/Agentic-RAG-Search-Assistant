@@ -6,7 +6,7 @@ export type PreviewKind = 'image' | 'pdf' | 'text' | 'video' | null
 export const TEXT_PREVIEW_MAX = 2 * 1024 * 1024
 
 const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp']
-const TEXT_EXT = ['txt', 'md', 'markdown', 'csv', 'json', 'xml', 'yml', 'yaml', 'ini', 'log', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'py', 'go', 'java', 'c', 'h', 'cpp', 'sh', 'bat', 'sql']
+const TEXT_EXT = ['txt', 'md', 'markdown', 'csv', 'json', 'xml', 'yml', 'yaml', 'ini', 'log', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'py', 'go', 'java', 'c', 'h', 'cpp', 'cc', 'cxx', 'hpp', 'sh', 'bat', 'sql']
 const VIDEO_EXT = ['mp4', 'webm', 'mov', 'mkv']
 
 /** 是否为 Markdown 文件（预览时渲染而非源码）。 */

@@ -91,7 +91,7 @@ def test_record_usage_prefers_usage_metadata(monkeypatch):
 
     msg = FakeMsg(usage_metadata={"input_tokens": 1000, "output_tokens": 500})
     graph.record_result_usage(msg, "x")
-    assert calls == {"prompt": 1000, "completion": 500}
+    assert calls == {"prompt": 1000, "prompt_cached": 0, "completion": 500}
 
 
 def test_record_usage_fallback_to_token_usage(monkeypatch):
@@ -112,4 +112,4 @@ def test_record_usage_fallback_to_token_usage(monkeypatch):
         },
     )
     graph.record_result_usage(msg, "x")
-    assert calls == {"prompt": 300, "completion": 60}
+    assert calls == {"prompt": 300, "prompt_cached": 0, "completion": 60}

@@ -83,6 +83,16 @@ public class FileController {
         private String content;
     }
 
+    @Data
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public static class CreateTextReq {
+        @NotBlank
+        private String name;
+        @NotBlank
+        private String content;
+        private Long folderId;
+    }
+
     private Long userId(HttpServletRequest request) {
         return (Long) request.getAttribute("user_id");
     }
@@ -176,6 +186,18 @@ public class FileController {
         data.put("total_lines", view.totalLines());
         data.put("truncated", view.truncated());
         return Resp.ok(data);
+    }
+
+    @PostMapping("/text")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Resp<FileInfo> createTextFile(@Valid @RequestBody CreateTextReq req, HttpServletRequest request) {
+        requireAgent(request);
+        if (req.getContent().getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                > props.getUpload().getDirectMaxBytes()) {
+            throw AppException.fileTooLarge("content too large");
+        }
+        FileRecord f = fileService.createTextFile(userId(request), req.getName(), req.getFolderId(), req.getContent());
+        return Resp.created(FileInfo.from(f));
     }
 
     /** 仅 agent 内部调用（X-Agent-Token）可写内容；用户前端不可直接覆盖。 */

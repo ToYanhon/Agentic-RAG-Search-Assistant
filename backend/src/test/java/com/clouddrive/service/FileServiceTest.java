@@ -152,6 +152,29 @@ class FileServiceTest {
                 .hasMessageContaining("access denied");
     }
 
+    // ---------- createTextFile ----------
+
+    @Test
+    void createTextFileDelegatesToUpload() {
+        nameFree();
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        FileRecord out = svc.createTextFile(1L, "hello.cc", null, "int main() { return 0; }");
+
+        assertThat(out.getName()).isEqualTo("hello.cc");
+        assertThat(out.getMimeType()).isEqualTo("text/plain");
+        assertThat(out.getSize()).isEqualTo("int main() { return 0; }".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        verify(storage).upload(anyString(), any(), anyLong(), anyString());
+    }
+
+    @Test
+    void createTextFileRejectsBlankName() {
+        assertThatThrownBy(() -> svc.createTextFile(1L, "  ", null, "x"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("name required");
+    }
+
     @Test
     void overwriteContentRejectsMissingFile() {
         when(fileRepo.findById(99L)).thenReturn(Optional.empty());

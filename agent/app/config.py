@@ -42,6 +42,10 @@ class Settings:
     llm_price_input: float = float(os.getenv("LLM_PRICE_INPUT", "1.0"))
     llm_price_output: float = float(os.getenv("LLM_PRICE_OUTPUT", "2.0"))
 
+    # 长会话上下文：始终保留最近 N 轮完整消息（0 = 纯 token 预算模式），更早消息折叠进摘要。
+    # 目的：近期上下文完整 + 前缀稳定以命中 provider 上下文缓存，同时限制历史无限膨胀。
+    context_keep_turns: int = int(os.getenv("CONTEXT_KEEP_TURNS", "10"))
+
     # 后端地址（本地开发 localhost；容器部署用 http://backend:8080）
     backend_url: str = os.getenv("BACKEND_URL", "http://localhost:8080/api/v1")
 

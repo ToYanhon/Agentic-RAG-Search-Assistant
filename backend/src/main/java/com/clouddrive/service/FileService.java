@@ -93,6 +93,16 @@ public class FileService {
         return f;
     }
 
+    /** 按内容创建文本文件（agent 工具用，对齐 upload 语义但直接接受字符串内容）。 */
+    @Transactional
+    public FileRecord createTextFile(Long ownerId, String name, Long folderId, String content) {
+        if (name == null || name.isBlank()) {
+            throw AppException.badRequest("name required");
+        }
+        byte[] data = content == null ? new byte[0] : content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return upload(ownerId, data, name, folderId, "text/plain");
+    }
+
     /** 秒传预检：MD5+大小查重，命中且源属于请求者本人时 CopyObject 到新 key 建记录。 */
     @Transactional
     public FileRecord checksumInstant(Long ownerId, String md5, String name, long size, Long folderId) {
@@ -345,7 +355,7 @@ public class FileService {
     private static final java.util.Set<String> TEXT_EXTS = java.util.Set.of(
             "txt", "md", "markdown", "csv", "json", "xml", "yml", "yaml", "ini", "log",
             "js", "ts", "tsx", "jsx", "html", "css", "py", "go", "java", "c", "h", "cpp",
-            "sh", "bat", "sql");
+            "cc", "cxx", "hpp", "sh", "bat", "sql");
 
     private static boolean isTextName(String name) {
         if (name == null) {

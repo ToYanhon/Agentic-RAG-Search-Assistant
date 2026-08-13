@@ -53,19 +53,40 @@ def is_retryable(exc: Exception) -> bool:
     return status in RETRYABLE_STATUS
 
 
+def _cached_tokens(um: dict) -> int:
+    """从 usage_metadata 提取命中的前缀缓存 token。
+
+    OpenAI 兼容（DeepSeek/OpenAI/智谱等）：usage.prompt_tokens_details.cached_tokens；
+    Anthropic 原生：usage.cache_read_input_tokens（经 langchain 归一化后可能在 prompt_tokens_details）。
+    """
+    ptd = um.get("prompt_tokens_details") or {}
+    cached = int(ptd.get("cached_tokens") or 0)
+    if not cached:
+        cached = int(um.get("prompt_cache_hit_tokens") or 0)
+    return max(0, cached)
+
+
 def _record_usage_meta(um: dict | None, model: str) -> None:
-    """按 usage_metadata 记录 token 数与成本（元，按模型真实单价）。"""
+    """按 usage_metadata 记录 token 数与成本（元，按模型真实单价，缓存命中分价）。"""
     if not um:
         return
     prompt = int(um.get("input_tokens") or 0)
     completion = int(um.get("output_tokens") or 0)
     if not prompt and not completion:
         return
+    cached = _cached_tokens(um)
+    uncached = max(0, prompt - cached)
     labels = {"model": model}
     llm_tokens.inc(prompt, {**labels, "type": "prompt"})
+    llm_tokens.inc(cached, {**labels, "type": "prompt_cached"})
     llm_tokens.inc(completion, {**labels, "type": "completion"})
     mm = model_meta(current_provider(), model)
-    cost = prompt / 1e6 * mm.price_in + completion / 1e6 * mm.price_out
+    cached_price = mm.price_in_cached if mm.price_in_cached > 0 else mm.price_in
+    cost = (
+        uncached / 1e6 * mm.price_in
+        + cached / 1e6 * cached_price
+        + completion / 1e6 * mm.price_out
+    )
     llm_cost.inc(cost, labels)
 
 

@@ -285,6 +285,23 @@ async def write_file_content(file_id: int, content: str) -> str:
 
 @tool
 @safe_tool
+async def create_file(name: str, content: str, folder_id: int = 0) -> str:
+    """新建一个文本文件（仅用户自己的空间；name 为文件名，含扩展名，如 report.py）。"""
+    uid = current_user_id.get()
+    body: dict = {"name": name, "content": content}
+    if folder_id > 0:
+        body["folder_id"] = folder_id
+    resp = await _http_send("POST", "/files/text", {"user_id": uid}, body)
+    if resp and resp.status_code == 201:
+        data = (resp.json().get("data") or {})
+        return f"[已创建文件 {data.get('id')}: {data.get('name')}]"
+    if resp is not None:
+        return f"[创建失败: HTTP {resp.status_code}]"
+    return "[无法创建文件]"
+
+
+@tool
+@safe_tool
 async def edit_file_content(file_id: int, old_string: str, new_string: str) -> str:
     """对文本文件做精确替换（old_string 必须在文件中唯一匹配；仅限用户自己的文本文件）。"""
     uid = current_user_id.get()
@@ -368,10 +385,13 @@ FILE_TOOLS = [
     summarize_file,
     list_folder,
     get_file_info,
+    create_file,
+    write_file_content,
+    edit_file_content,
 ]
 WEB_TOOLS = [web_search]
 MEMORY_TOOLS = [save_memory, forget_memory, get_memory]
-GENERAL_TOOLS = [get_storage_usage, write_file_content, edit_file_content]
+GENERAL_TOOLS = [get_storage_usage, write_file_content, edit_file_content, create_file]
 
 # 基础工具全集（ToolManager 注册用）
 tools = FILE_TOOLS + WEB_TOOLS + MEMORY_TOOLS + GENERAL_TOOLS

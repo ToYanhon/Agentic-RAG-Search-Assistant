@@ -137,19 +137,20 @@ def test_workflow_full_turn(monkeypatch):
 
     texts = [e["content"] for e in events if e["type"] == "text"]
     assert "记忆已完成" in texts
-    assert "好的，已处理" in texts
+    # supervisor 收尾已抑制（worker 已给出文本答复，避免重复复述）
+    assert "好的，已处理" not in texts
 
-    # 持久化：最后一条 AI 消息 + usage
+    # 持久化：最后一条 AI 消息 + usage（worker 的最终答复）
     assert session.persisted is not None
     assert session.persisted[-1]["role"] == "ai"
-    assert session.persisted[-1]["content"] == "好的，已处理"
+    assert session.persisted[-1]["content"] == "记忆已完成"
     assert "usage" in session.persisted[-1]
     assert session.usage is not None
 
     # 后台记忆提炼已调度
     assert memory.scheduled and memory.scheduled[0][0] == 1
 
-    # LLM 共调用 4 次
+    # LLM 共调用 4 次（含被抑制的 supervisor 收尾）
     assert fake.calls == 4
 
 

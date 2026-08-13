@@ -29,7 +29,8 @@ def test_budget_small_window():
     assert cb._budget_tokens(128000) == 128000 - cb.OUTPUT_RESERVE_BIG
 
 
-def test_greedy_prefers_latest():
+def test_greedy_prefers_latest(monkeypatch):
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
     h = _mk([(i * 2 + 1, "user", f"问{i}" * 50) for i in range(15)])
     r = run(cb.build_context(h, "now", 1500, None))
     kept_rows = sorted(m["rowid"] for m in r.messages if "rowid" in m)
@@ -40,7 +41,8 @@ def test_greedy_prefers_latest():
     assert r.dropped > 0
 
 
-def test_tool_chain_atomic():
+def test_tool_chain_atomic(monkeypatch):
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
     h = _mk([
         (1, "user", "问" * 30),
         (2, "ai", "答" * 30),
@@ -57,7 +59,8 @@ def test_tool_chain_atomic():
     assert 6 in kept
 
 
-def test_summary_generated_and_injected():
+def test_summary_generated_and_injected(monkeypatch):
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
     h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
 
     async def fake_gen(prev_summary, msgs):
@@ -72,7 +75,8 @@ def test_summary_generated_and_injected():
     assert any("测试摘要" in str(m["content"]) for m in sys_msgs)
 
 
-def test_summary_cached_reuse():
+def test_summary_cached_reuse(monkeypatch):
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
     h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
     with patch.object(cb, "_generate_summary") as gen, \
          patch("app.service.session_service.get_session_summary",
@@ -84,8 +88,9 @@ def test_summary_cached_reuse():
     assert "旧摘要" in r.summary_text
 
 
-def test_summary_cumulative_chains_previous():
+def test_summary_cumulative_chains_previous(monkeypatch):
     """新一轮折叠时，以上一轮累积摘要为输入重写生成（滚动累积）。"""
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
     h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
 
     captured = {}
@@ -106,6 +111,7 @@ def test_summary_cumulative_chains_previous():
 
 
 def test_generate_summary_failure_falls_back(monkeypatch):
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
     h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
 
     async def boom(prev_summary, msgs):
@@ -116,6 +122,20 @@ def test_generate_summary_failure_falls_back(monkeypatch):
     assert r.truncated
     assert not r.summary_used
     assert not r.summary_generated
+
+
+def test_keep_recent_turns_regardless_of_budget(monkeypatch):
+    """keep_turns 生效：最近 N 组即使未超预算也全部保留（前缀稳定利于缓存）。"""
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 3)
+    h = _mk([(i * 2 + 1, "user", f"问{i}" * 10) for i in range(8)])
+    # 预算极小，仅靠 token 只会保留 1 组；keep_turns=3 应至少保留最近 3 组
+    r = run(cb.build_context(h, "now", 100, None))
+    kept_rows = sorted(m["rowid"] for m in r.messages if "rowid" in m)
+    assert 15 in kept_rows  # 最近组保留
+    assert 13 in kept_rows
+    assert 11 in kept_rows
+    assert 1 not in kept_rows  # 早期被折叠
+    assert r.truncated
 
 
 def run_future(value):

@@ -53,6 +53,13 @@ def _sanitize_error(e: Exception) -> str:
     return f"{type(e).__name__}: {msg}"
 
 
+def _cached_usage_tokens(um: dict) -> int:
+    """提取单次 LLM 调用命中的前缀缓存 token（供 meta 汇总展示）。"""
+    from app.agent.llm_utils import _cached_tokens
+
+    return _cached_tokens(um)
+
+
 def _transfer_tool(target: str) -> StructuredTool:
     """构造把任务转移给指定 worker 的工具（无参，直接返回目标名）。
 
@@ -110,7 +117,7 @@ class AgentWorkflow:
         from app.service import session_service as svc
 
         started = time.perf_counter()
-        usage: dict[str, int] = {"in": 0, "out": 0}
+        usage: dict[str, int] = {"in": 0, "out": 0, "cached": 0}
         messages: list[BaseMessage] = []
         budget = None
         model = current_model()
@@ -124,6 +131,13 @@ class AgentWorkflow:
             skills_context = await self.skills.activate(user_id, message)
             budget = await self.context.build(history, message, session_id)
             messages = [dict_to_message(d) for d in budget.messages]
+            # 当前时间附加到本轮 user 消息末尾（不进 system/历史），
+            # 保持 system + 历史前缀稳定以命中 provider 上下文缓存。
+            if messages and getattr(messages[-1], "content", None):
+                last = messages[-1]
+                from app.prompt.prompts import current_time_context
+
+                last.content = f"{last.content}\n\n{current_time_context()}"
             if budget.summary_usage:
                 record_stream_usage(budget.summary_usage, model)
                 usage["in"] += int(budget.summary_usage.get("input_tokens") or 0)
@@ -198,6 +212,8 @@ class AgentWorkflow:
                 "input_tokens": usage["in"],
                 "output_tokens": usage["out"],
                 "total_tokens": usage["in"] + usage["out"],
+                "prompt_cache_hit_tokens": usage.get("cached", 0),
+                "prompt_cache_miss_tokens": max(0, usage["in"] - usage.get("cached", 0)),
                 "cost_yuan": round(cost, 6),
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 **(budget.to_meta() if budget else {}),
@@ -221,27 +237,40 @@ class AgentWorkflow:
         skills_context: str,
     ) -> AsyncIterator[dict[str, Any]]:
         sup = self._llm(TRANSFER_TOOLS)
+        # worker 完成且已输出文本答复时，抑制 supervisor 收尾复述（避免重复内容）
+        worker_spoke = False
         while True:
             out: list = []
-            async for text in self._stream_llm(
-                sup,
-                [SystemMessage(content=build_supervisor_prompt())] + messages,
-                usage,
-                out,
-            ):
-                if text:
-                    yield {"type": "text", "content": text}
+            if worker_spoke:
+                # 仅取 supervisor 的 tool_calls 判断是否需再次转移，不流式复述文本
+                await self._collect(llm=sup, messages=[
+                    SystemMessage(content=build_supervisor_prompt())] + messages,
+                    usage=usage, out=out)
+            else:
+                async for text in self._stream_llm(
+                    sup,
+                    [SystemMessage(content=build_supervisor_prompt())] + messages,
+                    usage,
+                    out,
+                ):
+                    if text:
+                        yield {"type": "text", "content": text}
             ai = out[0]
-            messages.append(ai)
             calls = getattr(ai, "tool_calls", None) or []
             if not calls:
+                # worker 已给出最终答复且 supervisor 无再转移需求：收尾复述文本不入历史
+                if worker_spoke:
+                    return
+                messages.append(ai)
                 return  # 最终答复已流式输出
+            messages.append(ai)
             name = str(calls[0].get("name", ""))
             if not name.startswith("transfer_to_"):
                 return
             target = name[len("transfer_to_") :]
             if target not in WORKER_NAMES:
                 return
+            worker_spoke = False
             # 转移工具执行结果落一条 ToolMessage（与旧 langgraph transfer 节点语义一致）
             tid = calls[0].get("id") or uuid.uuid4().hex
             messages.append(
@@ -252,6 +281,8 @@ class AgentWorkflow:
             async for ev in self._worker(
                 target, messages, usage, memories, skills_context
             ):
+                if ev["type"] == "text" and ev.get("content"):
+                    worker_spoke = True
                 yield ev
 
     # ---------- worker ReAct 循环 ----------
@@ -311,6 +342,25 @@ class AgentWorkflow:
         if um:
             usage["in"] += int(um.get("input_tokens") or 0)
             usage["out"] += int(um.get("output_tokens") or 0)
+            usage["cached"] += _cached_usage_tokens(um)
+            record_stream_usage(um, current_model())
+
+    async def _collect(
+        self,
+        llm,
+        messages: list[BaseMessage],
+        usage: dict[str, int],
+        out: list,
+    ) -> None:
+        """流式调用 LLM 但不产出文本（用于 supervisor 收尾去重）：仅取最终消息与 usage。"""
+        async for _text, final in llm_stream(llm, messages):
+            pass
+        out.append(final)
+        um = getattr(final, "usage_metadata", None)
+        if um:
+            usage["in"] += int(um.get("input_tokens") or 0)
+            usage["out"] += int(um.get("output_tokens") or 0)
+            usage["cached"] += _cached_usage_tokens(um)
             record_stream_usage(um, current_model())
 
 

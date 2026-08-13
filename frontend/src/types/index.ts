@@ -78,6 +78,9 @@ export interface ChatMessage {
     dropped_messages?: number
     /** 历史折叠摘要内容（有折叠时存在） */
     summary_text?: string
+    /** 命中 provider 前缀缓存的 token 数（0/缺省表示无缓存） */
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
   }
 }
 
@@ -102,4 +105,7 @@ export interface ChatStreamEvent {
   dropped_messages?: number
   /** 历史折叠生成的摘要文本（有折叠时存在） */
   summary_text?: string
+  /** 命中 provider 前缀缓存的 token 数（meta 事件） */
+  prompt_cache_hit_tokens?: number
+  prompt_cache_miss_tokens?: number
 }

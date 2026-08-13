@@ -22,7 +22,7 @@ WORKER_NAMES: dict[str, str] = {
 
 # worker id → 一句话能力摘要（转移工具 schema 描述用，供 Supervisor 路由决策）
 WORKER_TAGLINES: dict[str, str] = {
-    "file": "查找/阅读/总结/浏览网盘文件，语义检索文件内容",
+    "file": "查找/阅读/总结/浏览网盘文件，语义检索文件内容；创建、编辑、覆盖文本文件",
     "web": "搜索互联网获取实时信息",
     "general": "日常问答、记忆管理、存储空间查询等通用任务",
 }

@@ -174,8 +174,17 @@ async def build_context(
 
     kept: list[_Group] = []
     dropped_groups: list[_Group] = []
-    # 从最新往回贪心保留（新消息优先），装不下的（更早期的）折叠进摘要
+    # 从最新往回贪心保留（新消息优先）：
+    # 1) 始终保留最近 context_keep_turns 组（近期上下文完整 + 前缀稳定利于缓存）
+    # 2) 更早的组按 token 预算保留，装不下的折叠进摘要
+    keep_turns = settings.context_keep_turns if hasattr(settings, "context_keep_turns") else 0
+    recent = 0
     for g in reversed(groups):
+        if keep_turns > 0 and recent < keep_turns:
+            kept.append(g)
+            used += g.tokens
+            recent += 1
+            continue
         if used + g.tokens <= budget:
             kept.append(g)
             used += g.tokens

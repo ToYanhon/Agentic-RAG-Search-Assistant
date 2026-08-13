@@ -233,6 +233,8 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
                 summary_used: meta.summary_used,
                 dropped_messages: meta.dropped_messages,
                 summary_text: meta.summary_text,
+                prompt_cache_hit_tokens: meta.prompt_cache_hit_tokens ?? 0,
+                prompt_cache_miss_tokens: meta.prompt_cache_miss_tokens ?? 0,
               },
             }
             return n
@@ -574,6 +576,9 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
                           )}
                           <span>↑{m.usage.input_tokens}</span>
                           <span>↓{m.usage.output_tokens}</span>
+                          {typeof m.usage.prompt_cache_hit_tokens === 'number' && m.usage.prompt_cache_hit_tokens > 0 && (
+                            <span className="text-brand-deep">☑ 缓存 {m.usage.prompt_cache_hit_tokens}</span>
+                          )}
                           {typeof m.usage.cost_yuan === 'number' && m.usage.cost_yuan > 0 && (
                             <span>¥{m.usage.cost_yuan.toFixed(4)}</span>
                           )}

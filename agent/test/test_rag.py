@@ -35,6 +35,22 @@ def test_extract_txt():
     assert fixture.extract_text("你好，world".encode(), "a.txt") == "你好，world"
 
 
+@pytest.mark.parametrize(
+    "content, ext, expect",
+    [
+        ('int main() { return 0; }'.encode(), "a.cc", "int main()"),
+        ('print("hello")'.encode(), "a.py", "print"),
+        ('function add(a, b) { return a + b; }'.encode(), "a.js", "function add"),
+        ('package main\nfunc main() {}'.encode(), "a.go", "package main"),
+        ('public class A {}'.encode(), "a.java", "public class A"),
+    ],
+)
+def test_extract_code_languages_plain_text(content, ext, expect):
+    """代码/配置文件走纯文本解码（可被语义索引）。"""
+    assert fixture.extract_text(content, ext) != ""
+    assert expect in fixture.extract_text(content, ext)
+
+
 def test_extract_unknown_returns_empty():
     assert fixture.extract_text(b"\x00\x01", "a.zip") == ""
 

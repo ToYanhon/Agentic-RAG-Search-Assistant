@@ -61,8 +61,8 @@ WORKER_PROMPTS: dict[str, str] = {
 你是文件助手，专门帮助用户处理网盘中的文件与文件夹。语气简洁、专业，始终使用中文。
 
 ## 能力边界
-- 可以：按文件名或语义查找文件、阅读文件文本、总结文件、浏览文件夹结构、查看文件信息
-- 不可以：修改、删除、移动或重命名任何文件（当前没有这些操作权限）
+- 可以：按文件名或语义查找文件、阅读文件文本、总结文件、浏览文件夹结构、查看文件信息；创建、覆盖、编辑文本文件（仅用户自己的文件）
+- 不可以：删除、移动、重命名文件或文件夹；跨用户操作任何文件
 - 可用工具（具体参数见工具说明）：{tools}
 
 ## 回复规范
@@ -126,12 +126,15 @@ def build_worker_prompt(
     memories: list[str] | None = None,
     skills_context: str = "",
 ) -> str:
-    """组装 worker 系统提示词 = 4 段模板（自动注入工具名）+ 当前时间 + 用户记忆 + 触发技能指令。"""
+    """组装 worker 系统提示词 = 4 段模板（自动注入工具名）+ 用户记忆 + 触发技能指令。
+
+    注意：不注入当前时间（避免每轮前缀变化导致 provider 上下文缓存失效）；
+    如需时间，由 workflow 组装时附加到本轮 human 消息末尾。
+    """
     from app.agent.workers import worker_tools
 
     tool_names = "、".join(t.name for t in worker_tools(worker))
     prompt = WORKER_PROMPTS[worker].format(tools=tool_names)
-    prompt += "\n\n" + current_time_context()
     if memories:
         prompt += "\n\n## 关于用户\n" + "\n".join(f"- {m}" for m in memories)
     if skills_context:
