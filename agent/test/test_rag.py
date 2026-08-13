@@ -39,9 +39,34 @@ def test_extract_unknown_returns_empty():
     assert fixture.extract_text(b"\x00\x01", "a.zip") == ""
 
 
-def test_extract_reserved_none_returns_empty():
-    """预留在案的格式（如 xlsx）在接入提取器前返回空串，保持 skipped 行为。"""
-    assert fixture.extract_text(b"some binary", "a.xlsx") == ""
+def test_extract_not_implemented_returns_empty():
+    """MarkItDown 尚未覆盖的类型（gif/webp/bmp）返回空串，保持 skipped 行为。"""
+    assert fixture.extract_text(b"GIF89a...", "a.gif") == ""
+
+
+def test_extract_md_prefer_txt_entry():
+    """快照：md 走纯文本解码（语义族 text，不再走 MarkItDown）。"""
+    assert _EXTRACTORS[".md"][0] == "text"
+    assert _EXTRACTORS[".md"][1].__name__ == "_extract_txt"
+
+
+@pytest.mark.parametrize(
+    "content, ext, expect",
+    [
+        ('<html><body><h1>标题</h1><p>正文内容</p></body></html>'.encode(), "a.html", "标题"),
+        ("列A,列B\n值1,值2\n".encode(), "a.csv", "列A"),
+    ],
+)
+def test_extract_markitdown_document(content, ext, expect):
+    """MarkItDown 文本化：html/csv 等产出 Markdown 文本（含表格/标题）。"""
+    text = fixture.extract_text(content, ext)
+    assert text.strip() != ""
+    assert expect in text
+
+
+def test_extract_markitdown_missing_returns_empty():
+    """损坏/不可识别的 xlsx 提取失败 → 空串（沿用 skipped 行为，不抛异常）。"""
+    assert fixture.extract_text(b"\x00\x01\x02garbage", "a.xlsx") == ""
 
 
 def test_chunk_text_keeps_sentence_boundaries_and_overlap():
@@ -58,9 +83,3 @@ def test_chunk_text_splits_long_sentence_without_empty_chunks():
     chunks = fixture.chunk_text("甲" * 55, chunk_size=20, overlap=5)
 
     assert chunks == ["甲" * 15, "甲" * 20, "甲" * 20, "甲" * 15]
-
-
-def test_extract_md_prefer_txt_entry():
-    """快照：md 尚无提取器但已在表中（语义族 text）。"""
-    assert _EXTRACTORS[".md"][0] == "text"
-    assert _EXTRACTORS[".md"][1] is None

@@ -5,10 +5,10 @@ import { aiRequestHeaders } from '../utils/settings'
 
 /** 建立文件语义索引（embed）。长超时覆盖 30s 实例默认。agent 返回裸结构。 */
 export async function indexFile(fileId: number, filename?: string) {
-  const res = await client.post<{ status: string; chunks?: number }>(
+  const res = await client.post<{ status: string; chunks?: number; reason?: string }>(
     `/agent/index/${fileId}`,
     null,
-    { params: filename ? { filename } : {}, timeout: 120000 },
+    { params: filename ? { filename } : {}, headers: aiRequestHeaders(), timeout: 120000 },
   )
   return res.data
 }
@@ -28,7 +28,7 @@ export async function indexFolder(folderId: number) {
   const res = await client.post<{ status: string; total: number; indexed: number; skipped: number; failed: number; truncated: number }>(
     `/agent/index/folder/${folderId}`,
     null,
-    { timeout: 120000 },
+    { headers: aiRequestHeaders(), timeout: 120000 },
   )
   return res.data
 }
@@ -89,6 +89,15 @@ export async function deleteSession(id: string) {
 /** 重命名会话。 */
 export async function renameSession(id: string, title: string) {
   const res = await client.put<ApiResponse<string>>(`/agent/chat/sessions/${id}`, { title })
+  return res.data
+}
+
+/** 直接向会话追加消息（不触发 LLM 工作流），用于写入预生成的摘要等。 */
+export async function appendSessionMessages(sessionId: string, messages: { role: string; content: string }[]) {
+  const res = await client.post<ApiResponse<string>>(
+    `/agent/chat/sessions/${sessionId}/messages/append`,
+    { messages },
+  )
   return res.data
 }
 

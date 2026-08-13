@@ -5,7 +5,7 @@ import {
   listFiles, uploadFileWithProgress, deleteFile, getDownloadUrl, renameFile, moveFile,
   checksumFile, initMultipart, uploadPart, completeMultipart, abortMultipart, searchFiles,
 } from '../api/files'
-import { indexFile, indexFolder, getIndexStatus, unindexFile, getFolderIndexStatus, unindexFolder, summarizeFile } from '../api/agent'
+import { indexFile, indexFolder, getIndexStatus, unindexFile, getFolderIndexStatus, unindexFolder } from '../api/agent'
 import { getRootFolders, createFolder, deleteFolder, renameFolder, moveFolder } from '../api/folders'
 import { getProfile } from '../api/auth'
 import { createShare, deleteShare } from '../api/shares'
@@ -21,7 +21,6 @@ import QuotaBadge from '../components/QuotaBadge'
 import SearchResults from '../components/SearchResults'
 import PreviewModal from '../components/PreviewModal'
 import ShareDialog, { type ShareState } from '../components/ShareDialog'
-import SummaryDialog from '../components/SummaryDialog'
 import {
   IconFolder, IconInbox, IconPlus, IconSearch, IconSpark, IconUpload,
 } from '../components/Icons'
@@ -51,8 +50,8 @@ export default function Dashboard() {
   const [preview, setPreview] = useState<FileItem | null>(null)
   // 分享弹窗
   const [share, setShare] = useState<ShareState | null>(null)
-  // AI 摘要弹窗：当前对象 + 加载态 + 结果
-  const [summary, setSummary] = useState<{ name: string; loading: boolean; content: string; error?: string } | null>(null)
+  // AI 总结请求：交给右侧 Copilot 抽屉新建会话执行（nonce 变化即触发）
+  const [summaryRequest, setSummaryRequest] = useState<{ file: FileItem; nonce: number } | null>(null)
   // 操作对话框状态：当前待操作对象
   const [dialog, setDialog] = useState<null | {
     mode: 'rename-file' | 'rename-folder' | 'move-file' | 'move-folder'
@@ -117,6 +116,8 @@ export default function Dashboard() {
       /* 加载失败时保持空列表 */
     }
     getProfile().then((u) => setProfile(u ?? null)).catch(() => {})
+    // 列表已刷新：清空已查询标记，让可见文件重新拉取索引状态（删除/编辑后状态随之更新）
+    indexedQueried.current.clear()
     setTreeEpoch((e) => e + 1)
   }, [])
 
@@ -379,20 +380,10 @@ export default function Dashboard() {
     } catch { /* 创建失败忽略 */ }
   }
 
-  /** AI 总结：调 agent /summary（透传用户 AI 配置头）。 */
-  const handleSummarizeFile = async (f: FileItem) => {
-    setSummary({ name: f.name, loading: true, content: '' })
-    try {
-      const res = await summarizeFile(f.id, f.name)
-      setSummary({ name: f.name, loading: false, content: res?.summary ?? '' })
-    } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'response' in err
-        ? (err as { response?: { status?: number } }).response?.status === 400
-          ? '请先在设置中配置 AI（Base URL / API Key / 模型）'
-          : 'AI 总结失败，请稍后重试'
-        : 'AI 总结失败，请稍后重试'
-      setSummary({ name: f.name, loading: false, content: '', error: msg })
-    }
+  /** AI 总结：交由右侧 Copilot 抽屉新建会话执行（抽屉已注入用户 AI 配置头）。 */
+  const handleSummarizeFile = (f: FileItem) => {
+    setCopilotOpen(true)
+    setSummaryRequest((prev) => ({ file: f, nonce: (prev?.nonce ?? 0) + 1 }))
   }
 
   /** 取消分享。 */
@@ -416,8 +407,10 @@ export default function Dashboard() {
         if (res?.status === 'ok') {
           updateIndexed(f.id, true)
           showToast(`「${f.name}」索引完成`)
-        } else if (res?.status === 'skipped') showToast(`「${f.name}」跳过（不支持或超过 100MB）`)
-        else showToast(`「${f.name}」索引失败`)
+        } else if (res?.status === 'skipped') {
+          const reason = res.reason === 'file too large' ? '超过 100MB，无法索引' : '暂不支持或无文本内容'
+          showToast(`「${f.name}」跳过（${reason}）`)
+        } else showToast(`「${f.name}」索引失败`)
       }
     } catch {
       showToast('索引请求失败')
@@ -658,22 +651,16 @@ export default function Dashboard() {
       </main>
 
       {/* 右侧 AI Copilot 面板 */}
-      <Copilot open={copilotOpen} onClose={() => setCopilotOpen(false)} selected={selectedFiles} />
+      <Copilot
+        open={copilotOpen}
+        onClose={() => setCopilotOpen(false)}
+        selected={selectedFiles}
+        summaryRequest={summaryRequest}
+        onSummaryHandled={() => setSummaryRequest(null)}
+      />
 
       {/* 文件预览 */}
       <PreviewModal file={preview} onClose={() => setPreview(null)} onDownload={handleDownload} />
-
-      {/* AI 文件摘要 */}
-      {summary && (
-        <SummaryDialog
-          open={!!summary}
-          filename={summary.name}
-          loading={summary.loading}
-          content={summary.content}
-          error={summary.error}
-          onClose={() => setSummary(null)}
-        />
-      )}
 
       {/* 分享弹窗 */}
       <ShareDialog share={share} onClose={() => setShare(null)} onCancel={handleCancelShare} />

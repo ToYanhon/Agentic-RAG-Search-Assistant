@@ -76,6 +76,13 @@ public class FileController {
         private Long targetFolderId;
     }
 
+    @Data
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public static class ContentReq {
+        @NotBlank
+        private String content;
+    }
+
     private Long userId(HttpServletRequest request) {
         return (Long) request.getAttribute("user_id");
     }
@@ -148,6 +155,34 @@ public class FileController {
         long target = req.getTargetFolderId() == null ? 0 : req.getTargetFolderId();
         fileService.move(id, userId(request), target);
         return Resp.ok(null);
+    }
+
+    @PutMapping("/{id}/content")
+    public Resp<FileInfo> overwriteContent(@PathVariable Long id, @Valid @RequestBody ContentReq req,
+            HttpServletRequest request) {
+        requireAgent(request);
+        FileRecord f = fileService.overwriteContent(id, userId(request), req.getContent());
+        return Resp.ok(FileInfo.from(f));
+    }
+
+    @GetMapping("/{id}/content")
+    public Resp<Map<String, Object>> readContent(@PathVariable Long id,
+            @RequestParam(value = "offset", required = false, defaultValue = "1") int offset,
+            @RequestParam(value = "limit", required = false) Integer limit,
+            HttpServletRequest request) {
+        FileService.ContentView view = fileService.readContent(id, userId(request), offset, limit);
+        Map<String, Object> data = new HashMap<>();
+        data.put("content", view.content());
+        data.put("total_lines", view.totalLines());
+        data.put("truncated", view.truncated());
+        return Resp.ok(data);
+    }
+
+    /** 仅 agent 内部调用（X-Agent-Token）可写内容；用户前端不可直接覆盖。 */
+    private void requireAgent(HttpServletRequest request) {
+        if (!"agent".equals(request.getAttribute("caller"))) {
+            throw AppException.forbidden("agent only");
+        }
     }
 
     @GetMapping("/search")

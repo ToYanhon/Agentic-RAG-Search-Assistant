@@ -20,8 +20,12 @@ def test_worker_subsets(tm):
     for name in ["save_memory", "forget_memory", "get_memory"]:
         assert name in general
     assert "get_storage_usage" in general
+    assert "write_file_content" in general
+    assert "edit_file_content" in general
     assert "search_files" not in general
     assert "web_search" not in file
+    assert "write_file_content" not in file
+    assert "edit_file_content" not in file
 
 
 def test_get_known_and_unknown(tm):

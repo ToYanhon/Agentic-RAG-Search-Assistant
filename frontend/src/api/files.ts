@@ -62,6 +62,15 @@ export async function getFileBlob(id: number): Promise<Blob> {
   return resp.blob()
 }
 
+/** 读取文本文件内容（按行，offset 起始行 1 起，limit 0 表示全部）。 */
+export async function getFileContent(id: number, offset = 1, limit = 0) {
+  const res = await client.get<ApiResponse<{ content: string; total_lines: number; truncated: boolean }>>(
+    `/files/${id}/content`,
+    { params: { offset, limit: limit || undefined } },
+  )
+  return res.data
+}
+
 /** 重命名文件。 */
 export async function renameFile(id: number, name: string) {
   const res = await client.put<ApiResponse<null>>(`/files/${id}`, { name })

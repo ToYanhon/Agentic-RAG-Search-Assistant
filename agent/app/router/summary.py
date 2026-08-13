@@ -26,13 +26,13 @@ def _require_ai_config(request: Request) -> None:
 
 
 @router.post("/{file_id}")
-async def summary(file_id: int, user_id: int, request: Request):
+async def summary(file_id: int, request: Request):
     uid_header = request.headers.get("X-User-Id", "0")
     uid = int(uid_header) if uid_header.isdigit() else 0
-    if uid == 0 or uid != user_id:
+    if uid == 0:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     _require_ai_config(request)
-    text = await rag.summarize(file_id, user_id)
+    text = await rag.summarize(file_id, uid)
     if text is None:
         raise HTTPException(status_code=404, detail="file not found or unsupported")
     return {"summary": text}

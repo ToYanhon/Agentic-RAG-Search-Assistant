@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.agent.tools import current_user_id, tavily_api_key
 from app.agent.workflow import get_workflow
 from app.core.llm_override import LLMOverride, reset_llm_override, set_llm_override
-from app.model.chat import ChatRequest, CreateSessionRequest, RenameSessionRequest
+from app.model.chat import AppendMessagesRequest, ChatRequest, CreateSessionRequest, RenameSessionRequest
 from app.service import session_service as svc
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,33 @@ async def get_messages(session_id: str, request: Request):
         return JSONResponse({"error": "session not found"}, status_code=404)
     msgs = await svc.get_messages(session_id)
     return {"data": msgs}
+
+
+@router.post("/sessions/{session_id}/messages/append")
+async def append_messages(session_id: str, req: AppendMessagesRequest, request: Request):
+    """直接向会话追加消息（不触发 LLM 工作流），用于写入预生成的摘要对等。
+
+    仅校验归属与字段白名单；调用方需保证内容可信（agent 仅后端可访问）。
+    """
+    user_id = _user_id(request)
+    if user_id == 0:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    owner = await svc.get_session_owner(session_id)
+    if owner != user_id:
+        return JSONResponse({"error": "session not found"}, status_code=404)
+    if not req.messages:
+        return JSONResponse({"error": "empty messages"}, status_code=400)
+    await svc.add_messages(
+        session_id,
+        [
+            {
+                "role": m.get("role", "user"),
+                "content": m.get("content", ""),
+            }
+            for m in req.messages
+        ],
+    )
+    return {"data": "ok"}
 
 
 @router.post("/sessions/{session_id}/messages")

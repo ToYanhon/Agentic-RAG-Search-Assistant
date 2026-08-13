@@ -54,11 +54,25 @@ public class AgentTokenManager {
             return false;
         }
         try {
-            String stored = redis.opsForValue().get(KEY);
+            String stored = readCurrent();
             return token.equals(stored);
         } catch (Exception e) {
             log.warn("agent token validate failed", e);
             return false;
         }
+    }
+
+    /** 取当前生效的内部 token（供 AgentNotifier 等向后端/agent 直连时携带）。 */
+    public String get() {
+        try {
+            return readCurrent();
+        } catch (Exception e) {
+            log.warn("agent token get failed", e);
+            return null;
+        }
+    }
+
+    private String readCurrent() {
+        return redis.opsForValue().get(KEY);
     }
 }

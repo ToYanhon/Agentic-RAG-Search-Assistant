@@ -4,9 +4,9 @@
 框架侧能力：回合开始加载记忆注入提示词、回合结束后台提炼新事实。
 """
 
-import asyncio
 import logging
 
+from app.core.bg_tasks import run_bg
 from app.service import memory_service
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,13 @@ class MemoryManager:
         return "\n".join(f"- {m}" for m in memories)
 
     def schedule_extraction(self, user_id: int, conversation: str, session_id: str) -> None:
-        """回合后后台提炼长期记忆（不阻塞 SSE 完成；失败仅日志）。"""
+        """回合后后台提炼长期记忆（不阻塞 SSE 完成；走统一骨架重试，最终失败仅日志）。"""
         try:
-            asyncio.get_running_loop().create_task(
-                memory_service.extract_memory_from_conversation(
+            run_bg(
+                lambda: memory_service.extract_memory_from_conversation(
                     user_id, conversation, session_id
-                )
+                ),
+                name="memory_extract",
             )
         except RuntimeError:
             logger.warning("no running loop, skip memory extraction")

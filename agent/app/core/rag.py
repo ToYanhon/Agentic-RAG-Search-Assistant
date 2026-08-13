@@ -9,6 +9,8 @@ import asyncio
 import io
 import logging
 import re
+import threading
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -43,25 +45,80 @@ def _extract_docx(content: bytes) -> str:
     return "\n".join(p.text for p in doc.paragraphs)
 
 
+# MarkItDown 惰性单例（构造含 magika 模型加载，复用实例避免每次重建）。
+# 只用 convert_stream（绝不 convert/convert_uri）：入参为内存字节，无 URL 抓取面。
+_MARKITDOWN = None
+_MARKITDOWN_LOCK = threading.Lock()
+
+
+def _markitdown():
+    global _MARKITDOWN
+    if _MARKITDOWN is None:
+        with _MARKITDOWN_LOCK:
+            if _MARKITDOWN is None:
+                from markitdown import MarkItDown
+
+                _MARKITDOWN = MarkItDown()
+    return _MARKITDOWN
+
+
+# 图片 LLM 视觉描述提示词（中文，供语义检索；无需评价质量）
+_IMAGE_CAPTION_PROMPT = (
+    "请用中文详细描述这张图片的内容：主体、场景、人物/物体、动作、关键文字，"
+    "以及任何有助于检索的细节。只输出描述本身，不要评价图片质量。"
+)
+
+
+def _extract_markitdown(content: bytes, ext: str) -> str:
+    """MarkItDown 多格式 → Markdown 文本（xlsx/pptx/csv/html/图片等）。"""
+    kwargs = {}
+    if ext in (".jpg", ".jpeg", ".png"):
+        ov = get_llm_override()
+        client = _llm_vision_client(ov)
+        if client is not None:
+            kwargs["llm_client"] = client
+            kwargs["llm_model"] = (ov.model if ov and ov.model else None) or settings.llm_model
+            kwargs["llm_prompt"] = _IMAGE_CAPTION_PROMPT
+    result = _markitdown().convert_stream(io.BytesIO(content), file_extension=ext, **kwargs)
+    return result.text_content or ""
+
+
+def _llm_vision_client(ov: LLMOverride | None):
+    """按请求级 LLM 覆盖构建 OpenAI 兼容视觉 client（MarkItDown 走 chat.completions）。
+    非 openai 系（anthropic）或未配置 key 时返回 None → 图片只落元数据（可空）。"""
+    if ov is None or not ov.api_key:
+        return None
+    if (ov.provider or "openai") != "openai":
+        return None
+    try:
+        from openai import OpenAI
+
+        return OpenAI(base_url=ov.base_url or None, api_key=ov.api_key)
+    except Exception:
+        logger.exception("failed to build OpenAI client for image caption")
+        return None
+
+
 # 文本提取器注册表：扩展名(lower) → (语义族 type, 提取器或 None)。
 # 语义族用于索引 payload 的 type 标注（检索不受影响）；提取器为空表示该类型已预留但暂未接入。
-# 未来新增类型（图片 OCR / xlsx / pptx 等）只需在此注册提取器，即可无缝进入语义索引链路。
+# 未来新增类型只需在此注册提取器，即可无缝进入语义索引链路。
 _EXTRACTORS: dict[str, tuple[str, object]] = {
     ".docx": ("docx", _extract_docx),
     ".pdf": ("pdf", _extract_pdf),
     ".txt": ("text", _extract_txt),
-    # ---- 预留（族已就位，提取器待接入）----
-    ".md": ("text", None),
-    ".markdown": ("text", None),
-    ".csv": ("text", None),
-    ".html": ("text", None),
-    ".xlsx": ("xlsx", None),
-    ".xls": ("xlsx", None),
-    ".pptx": ("pptx", None),
-    ".ppt": ("pptx", None),
-    ".png": ("image", None),
-    ".jpg": ("image", None),
-    ".jpeg": ("image", None),
+    # ---- MarkItDown 文本化（产出 Markdown → 现有 dense/sparse 向量链路）----
+    ".md": ("text", _extract_txt),
+    ".markdown": ("text", _extract_txt),
+    ".csv": ("text", partial(_extract_markitdown, ext=".csv")),
+    ".html": ("text", partial(_extract_markitdown, ext=".html")),
+    ".xlsx": ("xlsx", partial(_extract_markitdown, ext=".xlsx")),
+    ".xls": ("xlsx", partial(_extract_markitdown, ext=".xls")),
+    ".pptx": ("pptx", partial(_extract_markitdown, ext=".pptx")),
+    ".ppt": ("pptx", partial(_extract_markitdown, ext=".ppt")),
+    ".jpg": ("image", partial(_extract_markitdown, ext=".jpg")),
+    ".jpeg": ("image", partial(_extract_markitdown, ext=".jpeg")),
+    ".png": ("image", partial(_extract_markitdown, ext=".png")),
+    # ---- 预留（族已就位，MarkItDown 不接受，暂不接入）----
     ".gif": ("image", None),
     ".webp": ("image", None),
     ".bmp": ("image", None),

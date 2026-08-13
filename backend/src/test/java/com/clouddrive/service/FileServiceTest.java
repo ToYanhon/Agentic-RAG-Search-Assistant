@@ -1,28 +1,46 @@
 package com.clouddrive.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.clouddrive.common.AppException;
+import com.clouddrive.entity.FileRecord;
+import com.clouddrive.entity.User;
 import com.clouddrive.repository.FileRepository;
+import com.clouddrive.repository.UserRepository;
+import com.clouddrive.service.AgentNotifier;
+import com.clouddrive.service.CacheService;
+import com.clouddrive.storage.MinioStorage;
 
 /**
- * FileService.uniqueName 去重逻辑测试（同文件夹内同名自动追加序号）。
+ * FileService 单元测试：uniqueName 去重 + overwriteContent 覆盖写。
  */
 class FileServiceTest {
 
     private FileRepository fileRepo;
+    private UserRepository userRepo;
+    private MinioStorage storage;
+    private AgentNotifier notifier;
     private FileService svc;
 
     @BeforeEach
     void setUp() {
         fileRepo = mock(FileRepository.class);
-        svc = new FileService(fileRepo, null, null, null, null, null);
+        userRepo = mock(UserRepository.class);
+        storage = mock(MinioStorage.class);
+        notifier = mock(AgentNotifier.class);
+        svc = new FileService(fileRepo, null, userRepo, storage, mock(CacheService.class), notifier);
     }
 
     private void nameFree() {
@@ -83,5 +101,152 @@ class FileServiceTest {
     void renamedKeepsExt() {
         nameTakenFor("a.txt", "a(1).txt", "a(2).txt");
         assertThat(svc.uniqueName(1L, null, "a.txt", 0L)).isEqualTo("a(3).txt");
+    }
+
+    // ---------- overwriteContent ----------
+
+    private FileRecord ownedFile(Long id, Long owner, long size) {
+        FileRecord f = new FileRecord();
+        f.setId(id);
+        f.setOwnerId(owner);
+        f.setName("a.txt");
+        f.setSize(size);
+        f.setMd5("oldmd5");
+        f.setObjectKey("users/" + owner + "/old-key-a.txt");
+        f.setMimeType("text/plain");
+        return f;
+    }
+
+    private User userWithStorage(long limit) {
+        User u = new User();
+        u.setId(1L);
+        u.setStorageUsed(0L);
+        u.setStorageLimit(limit);
+        return u;
+    }
+
+    @Test
+    void overwriteContentWritesNewObjectAndUpdatesRecord() {
+        FileRecord f = ownedFile(9L, 1L, 5);
+        when(fileRepo.findById(9L)).thenReturn(Optional.of(f));
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        FileRecord out = svc.overwriteContent(9L, 1L, "你好，新内容");
+
+        assertThat(out.getSize()).isEqualTo("你好，新内容".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        assertThat(out.getMd5()).isNotEqualTo("oldmd5");
+        assertThat(out.getObjectKey()).isNotEqualTo("users/1/old-key-a.txt");
+        verify(storage).upload(anyString(), any(), anyLong(), anyString());
+        verify(storage).delete("users/1/old-key-a.txt");
+        verify(notifier).notifyReindex(9L, 1L);
+    }
+
+    @Test
+    void overwriteContentRejectsNonOwner() {
+        FileRecord f = ownedFile(9L, 2L, 5);
+        when(fileRepo.findById(9L)).thenReturn(Optional.of(f));
+
+        assertThatThrownBy(() -> svc.overwriteContent(9L, 1L, "x"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("access denied");
+    }
+
+    @Test
+    void overwriteContentRejectsMissingFile() {
+        when(fileRepo.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> svc.overwriteContent(99L, 1L, "x"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("not found");
+    }
+
+    @Test
+    void overwriteContentRejectsStorageExceeded() {
+        FileRecord f = ownedFile(9L, 1L, 5);
+        when(fileRepo.findById(9L)).thenReturn(Optional.of(f));
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(3L))); // 容量不足
+
+        assertThatThrownBy(() -> svc.overwriteContent(9L, 1L, "很长的内容内容内容内容内容内容"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("storage limit");
+    }
+
+    // ---------- readContent ----------
+
+    private FileRecord textFile(Long id, Long owner, String name) {
+        FileRecord f = new FileRecord();
+        f.setId(id);
+        f.setOwnerId(owner);
+        f.setName(name);
+        f.setSize(10L);
+        f.setMimeType("text/plain");
+        f.setObjectKey("users/" + owner + "/" + name);
+        return f;
+    }
+
+    private void mockDownload(String content) throws Exception {
+        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        when(storage.download(anyString())).thenAnswer(inv -> {
+            software.amazon.awssdk.http.SdkHttpResponse http =
+                    software.amazon.awssdk.http.SdkHttpResponse.builder()
+                            .statusCode(200).build();
+            return new software.amazon.awssdk.core.ResponseInputStream<>(
+                    http, new java.io.ByteArrayInputStream(bytes));
+        });
+    }
+
+    @Test
+    void readContentSlicesByOffsetAndLimit() throws Exception {
+        FileRecord f = textFile(10L, 1L, "a.txt");
+        when(fileRepo.findById(10L)).thenReturn(Optional.of(f));
+        mockDownload("line1\nline2\nline3\nline4\nline5");
+
+        FileService.ContentView view = svc.readContent(10L, 1L, 2, 2);
+        assertThat(view.content()).isEqualTo("line2\nline3");
+        assertThat(view.totalLines()).isEqualTo(5);
+        assertThat(view.truncated()).isTrue();
+    }
+
+    @Test
+    void readContentFullWhenNoLimit() throws Exception {
+        FileRecord f = textFile(10L, 1L, "a.txt");
+        when(fileRepo.findById(10L)).thenReturn(Optional.of(f));
+        mockDownload("a\nb\nc");
+
+        FileService.ContentView view = svc.readContent(10L, 1L, 1, null);
+        assertThat(view.content()).isEqualTo("a\nb\nc");
+        assertThat(view.truncated()).isFalse();
+    }
+
+    @Test
+    void readContentRejectsNonTextName() throws Exception {
+        FileRecord f = textFile(10L, 1L, "photo.jpg");
+        when(fileRepo.findById(10L)).thenReturn(Optional.of(f));
+
+        assertThatThrownBy(() -> svc.readContent(10L, 1L, 1, null))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("not a text file");
+    }
+
+    @Test
+    void readContentRejectsNonOwner() throws Exception {
+        FileRecord f = textFile(10L, 2L, "a.txt");
+        when(fileRepo.findById(10L)).thenReturn(Optional.of(f));
+
+        assertThatThrownBy(() -> svc.readContent(10L, 1L, 1, null))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("access denied");
+    }
+
+    @Test
+    void readContentOffsetBeyondEndReturnsEmpty() throws Exception {
+        FileRecord f = textFile(10L, 1L, "a.txt");
+        when(fileRepo.findById(10L)).thenReturn(Optional.of(f));
+        mockDownload("a\nb");
+
+        FileService.ContentView view = svc.readContent(10L, 1L, 99, 10);
+        assertThat(view.content()).isEqualTo("");
+        assertThat(view.totalLines()).isEqualTo(2);
     }
 }

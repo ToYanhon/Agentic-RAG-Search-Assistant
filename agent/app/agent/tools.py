@@ -83,6 +83,33 @@ async def _http_get(path: str, params: dict, retries: int = 2) -> httpx.Response
     return last
 
 
+async def _http_send(method: str, path: str, params: dict, json: dict | None = None,
+                     retries: int = 2) -> httpx.Response | None:
+    """带超时与重试的 JSON 请求（POST/PUT 等，对齐 _http_get 的 token/重试/401 刷新逻辑）。"""
+    token = await get_internal_token()
+    last: httpx.Response | None = None
+    for attempt in range(retries + 2):
+        try:
+            async with httpx.AsyncClient(
+                headers={"X-Agent-Token": token}, timeout=15.0, trust_env=False
+            ) as client:
+                resp = await client.request(method, f"{settings.backend_url}{path}",
+                                            params=params, json=json)
+                if resp.status_code == 401:
+                    token = await get_internal_token(force_refresh=True)
+                    if attempt == 0:
+                        continue
+                    return resp
+                if resp.status_code < 500:
+                    return resp
+                last = resp
+        except httpx.HTTPError:
+            last = None
+        if attempt < retries:
+            await asyncio.sleep(0.5 * (2**attempt))
+    return last
+
+
 async def _tavily_search(query: str, api_key: str) -> dict | None:
     """调用 Tavily 搜索 API，返回原始 JSON；失败返回 None。"""
     try:
@@ -158,14 +185,39 @@ async def semantic_search(query: str) -> list[dict]:
 
 @tool
 @safe_tool
-async def read_file_content(file_id: int) -> str:
-    """读取文件的文本内容（支持 txt/pdf/docx）。"""
+async def read_file_content(file_id: int, offset: int = 1, limit: int = 0) -> str:
+    """读取文件的文本内容。文本类（txt/md/csv/json 等）按行读取，支持 offset（起始行，1 起）与
+    limit（最大行数，0 表示全部）；Office/图片等非文本自动走 MarkItDown 提取为可读文本。"""
     uid = current_user_id.get()
-    resp = await _http_get(f"/files/{file_id}/download", {"user_id": uid})
+    name = await _file_name(file_id, uid)
+    params: dict = {"user_id": uid}
+    if offset > 1:
+        params["offset"] = offset
+    if limit > 0:
+        params["limit"] = limit
+    resp = await _http_get(f"/files/{file_id}/content", params)
     if resp and resp.status_code == 200:
-        ct = resp.headers.get("content-type", "")
-        return f"[文件 {file_id} 不是文本类型]" if "text" not in ct else resp.text
+        d = (resp.json().get("data") or {})
+        content = d.get("content") or ""
+        if content:
+            return content
+    # 文本读取失败或非文本：回退下载 + MarkItDown 提取
+    dl = await _http_get(f"/files/{file_id}/download", {"user_id": uid})
+    if dl and dl.status_code == 200:
+        ct = dl.headers.get("content-type", "")
+        if "text" in ct:
+            return dl.text
+        text = RAGEngine().extract_text(dl.content, name or f"file_{file_id}.bin")
+        return text or f"[文件 {file_id} 无法解析为文本]"
     return f"[无法读取文件 {file_id}]"
+
+
+async def _file_name(file_id: int, uid: int) -> str:
+    """查后端取文件真实名称（失败返回空串，调用方兜底）。"""
+    resp = await _http_get(f"/files/{file_id}", {"user_id": uid})
+    if resp and resp.status_code == 200:
+        return (resp.json().get("data") or {}).get("name", "")
+    return ""
 
 
 @tool
@@ -216,6 +268,44 @@ async def get_file_info(file_id: int) -> dict:
     if resp and resp.status_code == 200:
         return resp.json().get("data", {})
     return {"error": "file not found"}
+
+
+@tool
+@safe_tool
+async def write_file_content(file_id: int, content: str) -> str:
+    """覆盖写入文件的内容（仅限用户自己的文件；Office/图片等二进制类型会被改写成纯文本）。"""
+    uid = current_user_id.get()
+    resp = await _http_send("PUT", f"/files/{file_id}/content", {"user_id": uid}, {"content": content})
+    if resp and resp.status_code == 200:
+        return f"[文件 {file_id} 内容已更新]"
+    if resp is not None:
+        return f"[写入失败: HTTP {resp.status_code}]"
+    return f"[无法写入文件 {file_id}]"
+
+
+@tool
+@safe_tool
+async def edit_file_content(file_id: int, old_string: str, new_string: str) -> str:
+    """对文本文件做精确替换（old_string 必须在文件中唯一匹配；仅限用户自己的文本文件）。"""
+    uid = current_user_id.get()
+    dl = await _http_get(f"/files/{file_id}/download", {"user_id": uid})
+    if not dl or dl.status_code != 200:
+        return f"[无法读取文件 {file_id}]"
+    ct = dl.headers.get("content-type", "")
+    if "text" not in ct:
+        name = await _file_name(file_id, uid)
+        text = RAGEngine().extract_text(dl.content, name or f"file_{file_id}.bin")
+    else:
+        text = dl.text
+    if text.count(old_string) != 1:
+        return f"[替换失败: old_string 匹配 {text.count(old_string)} 处，需唯一匹配；请提供更精确的文本]"
+    new_content = text.replace(old_string, new_string)
+    resp = await _http_send("PUT", f"/files/{file_id}/content", {"user_id": uid}, {"content": new_content})
+    if resp and resp.status_code == 200:
+        return f"[文件 {file_id} 已替换并保存]"
+    if resp is not None:
+        return f"[写入失败: HTTP {resp.status_code}]"
+    return f"[无法写入文件 {file_id}]"
 
 
 @tool
@@ -281,7 +371,7 @@ FILE_TOOLS = [
 ]
 WEB_TOOLS = [web_search]
 MEMORY_TOOLS = [save_memory, forget_memory, get_memory]
-GENERAL_TOOLS = [get_storage_usage]
+GENERAL_TOOLS = [get_storage_usage, write_file_content, edit_file_content]
 
 # 基础工具全集（ToolManager 注册用）
 tools = FILE_TOOLS + WEB_TOOLS + MEMORY_TOOLS + GENERAL_TOOLS

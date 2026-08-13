@@ -1,6 +1,6 @@
 /** AI Copilot 抽屉：合并两类能力 —— ① 会话历史列表（可搜索/切换/删除）② 当前会话对话（含文件上下文快捷操作）。 */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createSession, deleteSession, deleteMemory, getMessages, listMemories, listSessionItems, renameSession, sendMessageStream } from '../api/agent'
+import { appendSessionMessages, createSession, deleteSession, deleteMemory, getMessages, listMemories, listSessionItems, renameSession, sendMessageStream, summarizeFile } from '../api/agent'
 import { getLLMConfig } from '../api/llmConfig'
 import { buildConfigMap, getActiveProvider, PROVIDER_LABELS } from '../utils/settings'
 import type { AgentSession, ChatMessage, FileItem, MemoryItem } from '../types'
@@ -14,6 +14,10 @@ interface CopilotProps {
   open: boolean
   onClose: () => void
   selected: FileItem[]
+  /** 外部（Dashboard）触发的总结请求：nonce 变化即执行一次，强制新建会话。 */
+  summaryRequest?: { file: FileItem; nonce: number } | null
+  /** 处理完 summaryRequest 后由父级清除该请求。 */
+  onSummaryHandled?: () => void
 }
 
 const DEFAULT_WIDTH = 380
@@ -44,7 +48,7 @@ const contextFor = (files: FileItem[]) =>
 const isUser = (m: ChatMessage) => m.role === 'user' || m.role === 'human'
 const visible = (ms: ChatMessage[]) => ms.filter((m) => isUser(m) || m.role === 'ai')
 
-export default function Copilot({ open, onClose, selected }: CopilotProps) {
+export default function Copilot({ open, onClose, selected, summaryRequest, onSummaryHandled }: CopilotProps) {
   const [sessions, setSessions] = useState<AgentSession[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -257,9 +261,73 @@ export default function Copilot({ open, onClose, selected }: CopilotProps) {
     }
   }
 
-  const actions = selected.length > 0 ? quickActionsFor(selected[0]) : []
-  const sendQuick = (p: string) => run(`${contextFor(selected)} ${p}`)
+  /** 快捷「总结文档」：直连专用摘要端点（单次 LLM 调用），并写入当前会话（无则新建）。 */
+  const runSummary = async (file: FileItem, fresh = false) => {
+    if (!file || busy) return
+    const cfgMap = buildConfigMap(await getLLMConfig().catch(() => []))
+    const pc = cfgMap[getActiveProvider()]
+    const userText = `帮我总结一下「${file.name}」的核心内容`
+    if (!pc || !pc.configured) {
+      setMessages((m) => [
+        ...m,
+        { role: 'user', content: userText },
+        { role: 'ai', content: '（请先在 设置 → AI 配置 中配置 Base URL、API Key 与模型后再总结）' },
+      ])
+      return
+    }
+    setMessages((m) => [...m, { role: 'user', content: userText }, { role: 'ai', content: '' }])
+    setBusy(true)
+    let sid = activeId
+    try {
+      if (fresh || !sid) {
+        const res = await createSession(`总结·${file.name}`)
+        if (!res.data) throw new Error('会话创建失败')
+        sid = res.data.id
+        setActiveId(sid)
+        await loadSessions()
+      }
+      const res = await summarizeFile(file.id, file.name)
+      const summary = res?.summary || '（摘要生成失败，请重试）'
+      await appendSessionMessages(sid, [
+        { role: 'user', content: userText },
+        { role: 'ai', content: summary },
+      ])
+      setMessages((m) => {
+        const n = [...m]
+        n[n.length - 1] = { role: 'ai', content: summary }
+        return n
+      })
+      await loadSessions()
+    } catch {
+      setMessages((m) => {
+        const n = [...m]
+        n[n.length - 1] = { role: 'ai', content: '（总结失败，请重试）' }
+        return n
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
 
+  /** 响应外部（Dashboard）总结请求：总是新建会话执行。 */
+  useEffect(() => {
+    if (open && summaryRequest) {
+      setActiveId(null)
+      setMessages([])
+      runSummary(summaryRequest.file, true)
+      onSummaryHandled?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, summaryRequest?.nonce])
+
+  const actions = selected.length > 0 ? quickActionsFor(selected[0]) : []
+  const sendQuick = (a: { key: string; prompt: string }) => {
+    if (a.key === 'sum') {
+      runSummary(selected[0])
+      return
+    }
+    run(`${contextFor(selected)} ${a.prompt}`)
+  }
   const filtered = sessions.filter((s) =>
     (s.title || '').toLowerCase().includes(search.trim().toLowerCase()) ||
     (s.last_preview || '').toLowerCase().includes(search.trim().toLowerCase()),
@@ -445,7 +513,7 @@ export default function Copilot({ open, onClose, selected }: CopilotProps) {
                 {quickActionsFor(selected[0]).map((a) => (
                   <button
                     key={a.key}
-                    onClick={() => sendQuick(a.prompt)}
+                    onClick={() => sendQuick(a)}
                     disabled={busy}
                     className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-line bg-canvas/50 hover:bg-brand-soft hover:border-brand/40 hover:text-brand-deep text-sm text-ink-soft disabled:opacity-40 disabled:pointer-events-none transition-all active:scale-[.98]"
                   >

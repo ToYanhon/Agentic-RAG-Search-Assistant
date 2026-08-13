@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from app.auth_token import get_internal_token
 from app.config import settings
 from app.core.embedding import searcher
+from app.core.llm_override import LLMOverride, reset_llm_override, set_llm_override
 from app.core.rag import RAGEngine, detect_kind
 from app.core.vector_store import vector_store
 
@@ -40,6 +41,29 @@ def _uid(request: Request) -> int:
     return int(h) if h.isdigit() else 0
 
 
+def _llm_override(request: Request) -> LLMOverride:
+    """从请求头读取前端 AI 设置（provider / baseUrl / apiKey / model），未传则保持 None。"""
+    return LLMOverride(
+        provider=request.headers.get("X-LLM-Provider") or None,
+        base_url=request.headers.get("X-LLM-Base-URL") or None,
+        api_key=request.headers.get("X-LLM-Key") or None,
+        model=request.headers.get("X-LLM-Model") or None,
+    )
+
+
+def _with_llm_override(request: Request, coro):
+    """在请求级 LLM 覆盖（图片视觉描述等）生效下执行 coro，结束后复位。"""
+
+    async def _wrapped():
+        token = set_llm_override(_llm_override(request))
+        try:
+            return await coro
+        finally:
+            reset_llm_override(token)
+
+    return _wrapped()
+
+
 async def _index_one(file_id: int, uid: int, name: str = "") -> dict:
     """为单个文件建索引。返回 {status: ok|skipped|failed, chunks, reason}。"""
     content = await rag.download(file_id, uid)
@@ -48,7 +72,8 @@ async def _index_one(file_id: int, uid: int, name: str = "") -> dict:
     if len(content) > INDEX_MAX_BYTES:
         return {"status": "skipped", "reason": "file too large"}
     filename = name or await rag._filename(file_id, uid)
-    text = rag.extract_text(content, filename)
+    # 图片的 LLM 视觉描述会调用用户配置的模型：提取放线程池，避免阻塞事件循环
+    text = await asyncio.to_thread(rag.extract_text, content, filename)
     if not text.strip():
         return {"status": "skipped", "reason": "unsupported or empty file"}
     chunks = rag.chunk_text(text, chunk_size=500)
@@ -159,7 +184,10 @@ async def index_folder(folder_id: int, request: Request):
         async with sem:
             return await _index_one(f["id"], uid, f.get("name", ""))
 
-    results = await asyncio.gather(*(one(f) for f in files))
+    # 请求级 LLM 覆盖贯穿整组索引：图片视觉描述用用户配置的模型
+    results = await _with_llm_override(
+        request, asyncio.gather(*(one(f) for f in files))
+    )
     counts = {"ok": 0, "skipped": 0, "failed": 0}
     for r in results:
         counts[r["status"]] += 1
@@ -178,7 +206,7 @@ async def index_file(file_id: int, request: Request, filename: str = ""):
     uid = _uid(request)
     if uid == 0:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    result = await _index_one(file_id, uid, filename)
+    result = await _with_llm_override(request, _index_one(file_id, uid, filename))
     if result["status"] == "failed":
         return JSONResponse(result, status_code=404)
     return result

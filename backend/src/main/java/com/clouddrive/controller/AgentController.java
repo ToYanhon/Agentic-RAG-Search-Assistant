@@ -78,6 +78,12 @@ public class AgentController {
         return proxy(request, response, "/chat/sessions/" + sessionId + "/messages");
     }
 
+    @PostMapping("/api/v1/agent/chat/sessions/{session_id}/messages/append")
+    public StreamingResponseBody appendMessages(@PathVariable("session_id") String sessionId,
+                                                HttpServletRequest request, HttpServletResponse response) {
+        return proxy(request, response, "/chat/sessions/" + sessionId + "/messages/append");
+    }
+
     @PutMapping("/api/v1/agent/chat/sessions/{session_id}")
     public StreamingResponseBody renameSession(@PathVariable("session_id") String sessionId,
                                                HttpServletRequest request, HttpServletResponse response) {

@@ -15,6 +15,11 @@ class RenameSessionRequest(BaseModel):
     title: str
 
 
+class AppendMessagesRequest(BaseModel):
+    """直接向会话追加消息（不触发 LLM 工作流），供前端写入预生成的摘要等。"""
+    messages: list[dict]
+
+
 class SearchRequest(BaseModel):
     query: str
     user_id: int

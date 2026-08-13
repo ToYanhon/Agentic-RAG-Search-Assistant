@@ -28,6 +28,7 @@ from app.agent.skill_manager import SkillManager
 from app.agent.tool_manager import ToolManager
 from app.agent.workers import WORKER_NAMES, WORKER_TAGLINES
 from app.config import settings
+from app.core.bg_tasks import await_with_retry
 from app.core.llm import build_llm, current_model, current_provider
 from app.core.llm_override import get_llm_override
 from app.core.metrics import route_decisions
@@ -140,7 +141,7 @@ class AgentWorkflow:
             logger.exception("agent turn run failed")
             yield {"type": "error", "content": _sanitize_error(e)}
         finally:
-            # 3. 持久化
+            # 3. 持久化（走统一骨架重试，最终失败仅日志；不因失败中断 SSE 收尾）
             dicts: list[dict] = []
             try:
                 persistable = [m for m in messages if not isinstance(m, SystemMessage)]
@@ -164,7 +165,10 @@ class AgentWorkflow:
                         ),
                         "latency_ms": int((time.perf_counter() - started) * 1000),
                     }
-                await svc.replace_messages(session_id, dicts)
+                await await_with_retry(
+                    lambda: svc.replace_messages(session_id, dicts),
+                    name="persist_messages",
+                )
             except Exception:
                 logger.exception("failed to persist messages")
 

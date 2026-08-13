@@ -68,6 +68,7 @@ public class AuthFilter extends OncePerRequestFilter {
                     return;
                 }
                 request.setAttribute("user_id", id);
+                request.setAttribute("caller", "agent");
                 chain.doFilter(request, response);
                 return;
             }
@@ -93,6 +94,7 @@ public class AuthFilter extends OncePerRequestFilter {
         }
         request.setAttribute("user_id", td.userId());
         request.setAttribute("username", td.username());
+        request.setAttribute("caller", "user");
         chain.doFilter(request, response);
     }
 

@@ -1,6 +1,6 @@
 /** 文件预览模态框：图片 / PDF / 文本 / 视频 / 不支持提示。 */
 import { useEffect, useRef, useState } from 'react'
-import { getFileBlob } from '../api/files'
+import { getFileBlob, getFileContent } from '../api/files'
 import { formatBytes } from '../utils/format'
 import { previewKind, isMarkdown, TEXT_PREVIEW_MAX } from '../utils/preview'
 import type { FileItem } from '../types'
@@ -43,11 +43,15 @@ export default function PreviewModal({ file, onClose, onDownload }: PreviewModal
 
     ;(async () => {
       try {
-        const blob = await getFileBlob(file.id)
-        if (cancelled) return
         if (kind === 'text') {
-          setText(await blob.text())
+          // 文本：走读内容接口（按行），避免整文件读入内存
+          const res = await getFileContent(file.id, 1, Math.ceil(TEXT_PREVIEW_MAX / 8))
+          if (cancelled) return
+          const content = res?.data?.content ?? ''
+          setText(content.length > TEXT_PREVIEW_MAX ? content.slice(0, TEXT_PREVIEW_MAX) : content)
         } else {
+          const blob = await getFileBlob(file.id)
+          if (cancelled) return
           const u = URL.createObjectURL(blob)
           urlRef.current = u
           setUrl(u)

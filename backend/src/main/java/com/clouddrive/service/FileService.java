@@ -262,6 +262,102 @@ public class FileService {
         fileRepo.updateFolderId(fileId, target);
     }
 
+    // ---------- 写内容（agent 工具用） ----------
+
+    /** 覆盖已有文件内容（owner 限定）：写新对象 key 后更新记录（对齐秒传独立对象约定）。 */
+    @Transactional
+    public FileRecord overwriteContent(Long fileId, Long userId, String content) {
+        FileRecord f = fileRepo.findById(fileId)
+                .orElseThrow(() -> AppException.notFound("resource not found"));
+        if (!f.getOwnerId().equals(userId)) {
+            throw AppException.forbidden("access denied");
+        }
+        byte[] data = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        User user = userRepo.findById(userId).orElseThrow(() -> AppException.internal("owner not found"));
+        if (user.getStorageUsed() + data.length > user.getStorageLimit()) {
+            throw AppException.storageExceeded("storage limit exceeded");
+        }
+        String objectKey = objectKey(userId, f.getName());
+        String mime = "text/plain; charset=utf-8";
+        try {
+            storage.upload(objectKey, new ByteArrayInputStream(data), data.length, mime);
+        } catch (Exception e) {
+            throw AppException.internal("storage upload failed");
+        }
+        String oldKey = f.getObjectKey();
+        long oldSize = f.getSize();
+        f.setSize((long) data.length);
+        f.setMimeType(mime);
+        f.setMd5(md5Hex(data));
+        f.setObjectKey(objectKey);
+        try {
+            fileRepo.save(f);
+        } catch (Exception e) {
+            try {
+                storage.delete(objectKey);
+            } catch (Exception ignored) {
+            }
+            throw AppException.internal("update file record failed");
+        }
+        try {
+            storage.delete(oldKey);
+        } catch (Exception ignored) {
+        }
+        userRepo.addStorageUsed(userId, data.length - oldSize);
+        cache.del(profileKey(userId), checksumKey(userId, f.getMd5()));
+        // 内容已变更：异步通知 Agent 重建索引（尽力而为，防止检索命中过期内容）
+        notifier.notifyReindex(f.getId(), f.getOwnerId());
+        return f;
+    }
+
+    /** 文本内容按行读取（owner 校验；非文本拒绝；offset/limit 行切片）。 */
+    public ContentView readContent(Long fileId, Long userId, int offset, Integer limit) {
+        FileRecord f = fileRepo.findById(fileId)
+                .orElseThrow(() -> AppException.notFound("resource not found"));
+        if (!f.getOwnerId().equals(userId)) {
+            throw AppException.forbidden("access denied");
+        }
+        if (!isTextName(f.getName())) {
+            throw AppException.badRequest("not a text file");
+        }
+        String text;
+        try (InputStream in = storage.download(f.getObjectKey())) {
+            text = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw AppException.internal("storage read failed");
+        }
+        String[] lines = text.split("\n", -1);
+        int total = lines.length;
+        int from = Math.max(1, offset);
+        if (from > total) {
+            return new ContentView("", total, false);
+        }
+        int to = limit != null && limit > 0 ? Math.min(total, from + limit - 1) : total;
+        String joined = String.join("\n", java.util.Arrays.copyOfRange(lines, from - 1, to));
+        boolean truncated = to < total;
+        return new ContentView(joined, total, truncated);
+    }
+
+    /** 文本内容读取视图。 */
+    public record ContentView(String content, int totalLines, boolean truncated) {
+    }
+
+    private static final java.util.Set<String> TEXT_EXTS = java.util.Set.of(
+            "txt", "md", "markdown", "csv", "json", "xml", "yml", "yaml", "ini", "log",
+            "js", "ts", "tsx", "jsx", "html", "css", "py", "go", "java", "c", "h", "cpp",
+            "sh", "bat", "sql");
+
+    private static boolean isTextName(String name) {
+        if (name == null) {
+            return false;
+        }
+        int dot = name.lastIndexOf('.');
+        if (dot < 0) {
+            return false;
+        }
+        return TEXT_EXTS.contains(name.substring(dot + 1).toLowerCase());
+    }
+
     // ---------- 查询 ----------
 
     public List<FileRecord> search(Long ownerId, String query, int page, int pageSize) {
