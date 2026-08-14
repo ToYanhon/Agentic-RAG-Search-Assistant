@@ -14,8 +14,12 @@ def run(coro):
 
 def _mk(rows: list) -> list[dict]:
     h = []
-    for rid, role, content in rows:
-        h.append({"role": role, "content": content, "rowid": rid})
+    for item in rows:
+        rid, role, content = item[:3]
+        d = {"role": role, "content": content, "rowid": rid}
+        if len(item) > 3 and item[3]:
+            d["id"] = item[3]  # 稳定 msg_id（摘要折叠键）
+        h.append(d)
     return h
 
 
@@ -77,21 +81,59 @@ def test_summary_generated_and_injected(monkeypatch):
 
 def test_summary_cached_reuse(monkeypatch):
     monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
-    h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
-    with patch.object(cb, "_generate_summary") as gen, \
-         patch("app.service.session_service.get_session_summary",
-               lambda sid: run_future(("旧摘要", 999))):
-        r = run(cb.build_context(h, "问", 500, "s1"))
-    gen.assert_not_called()
-    assert r.summary_used
-    assert not r.summary_generated
-    assert "旧摘要" in r.summary_text
+    h = _mk([(i * 2 + 1, "user", "大" * 120, f"m{i * 2 + 1}") for i in range(10)])
+    state: dict = {}
+
+    async def fake_gen(prev_summary, msgs):
+        return ("旧摘要", {"input_tokens": 5, "output_tokens": 3})
+
+    async def fake_set(sid, summary, key):
+        state["key"] = key
+
+    async def fake_get(sid):
+        return ("旧摘要", state["key"]) if "key" in state else None
+
+    with patch.object(cb, "_generate_summary", fake_gen), \
+         patch("app.service.session_service.set_session_summary", fake_set), \
+         patch("app.service.session_service.get_session_summary", fake_get):
+        r1 = run(cb.build_context(h, "问", 500, "s1"))  # 首轮生成并落缓存
+        r2 = run(cb.build_context(h, "问", 500, "s1"))  # 同历史 → 命中
+    assert r1.summary_generated
+    assert r2.summary_used and not r2.summary_generated
+    assert "旧摘要" in r2.summary_text
+
+
+def test_summary_caches_hit_across_rounds_despite_rowid_churn(monkeypatch):
+    """A3 回归：两轮折叠历史 msg_id 不变、rowid 漂移（模拟 replace_messages
+    DELETE+INSERT 使行号单调暴涨）→ 第二轮折叠键（稳定 msg_id）一致，命中缓存。"""
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
+    h1 = _mk([(i * 2 + 1, "user", "大" * 120, f"m{i * 2 + 1}") for i in range(10)])
+    h2 = _mk([(i * 2 + 1 + 1000, "user", "大" * 120, f"m{i * 2 + 1}") for i in range(10)])
+
+    state: dict = {}
+
+    async def fake_gen(prev_summary, msgs):
+        return ("测试摘要", {"input_tokens": 5, "output_tokens": 3})
+
+    async def fake_set(sid, summary, key):
+        state["key"] = key
+
+    async def fake_get(sid):
+        return ("测试摘要", state.get("key")) if "key" in state else None
+
+    with patch.object(cb, "_generate_summary", fake_gen), \
+         patch("app.service.session_service.set_session_summary", fake_set), \
+         patch("app.service.session_service.get_session_summary", fake_get):
+        r1 = run(cb.build_context(h1, "问", 500, "s1"))
+        r2 = run(cb.build_context(h2, "问", 500, "s1"))
+    assert r1.summary_generated
+    assert r2.summary_used and not r2.summary_generated  # 第二轮命中缓存，不重复调 LLM
 
 
 def test_summary_cumulative_chains_previous(monkeypatch):
     """新一轮折叠时，以上一轮累积摘要为输入重写生成（滚动累积）。"""
     monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
-    h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
+    h = _mk([(i * 2 + 1, "user", "大" * 120, f"m{i * 2 + 1}") for i in range(10)])
 
     captured = {}
 
@@ -102,7 +144,7 @@ def test_summary_cumulative_chains_previous(monkeypatch):
 
     with patch.object(cb, "_generate_summary", fake_gen), \
          patch("app.service.session_service.get_session_summary",
-               lambda sid: run_future(("上一轮摘要", 5))):  # 覆盖点低于本轮 fold_max
+               lambda sid: run_future(("上一轮摘要", "older-key"))):  # 折叠键前移 → 重写
         r = run(cb.build_context(h, "问", 500, "s1"))
     assert r.summary_generated
     assert captured["prev"] == "上一轮摘要"  # 上一轮摘要被喂给生成

@@ -131,8 +131,8 @@ def test_summary_cache():
     async def run():
         sid = await _mk(1)
         assert await svc.get_session_summary(sid) is None
-        await svc.set_session_summary(sid, "摘要内容", 42)
+        await svc.set_session_summary(sid, "摘要内容", "m42")
         cached = await svc.get_session_summary(sid)
-        assert cached == ("摘要内容", 42)
+        assert cached == ("摘要内容", "m42")
 
     asyncio.run(run())

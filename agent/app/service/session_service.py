@@ -245,21 +245,26 @@ async def add_messages(session_id: str, messages: list[dict]) -> None:
 
 
 async def replace_messages(session_id: str, messages: list[dict]) -> None:
-    """事务内全量替换会话消息（幂等，原子：先删后插）。"""
+    """原子替换会话消息：先删后插与 updated_at 更新在同一个事务内完成。
+
+    任一步失败整体回滚，崩溃不留「删了一半/空会话」的半状态（IMPROVEMENTS.md A2）。
+    """
     rows = [_dict_to_row(session_id, m) for m in messages]
     now = int(__import__("time").time())
 
-    async def _tx():
-        await db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
-        if rows:
-            await db.execute_many(
-                "INSERT INTO messages (session_id, msg_id, role, content, tool_calls, tool_call_id, usage, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                rows,
-            )
-        await db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
+    ops: list[tuple] = [
+        ("DELETE FROM messages WHERE session_id=?", (session_id,)),
+    ]
+    if rows:
+        ops.append((
+            "INSERT INTO messages (session_id, msg_id, role, content, tool_calls, tool_call_id, usage, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            rows,
+            True,
+        ))
+    ops.append(("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id)))
 
-    await _tx()
+    await db.execute_tx(ops)
     await _invalidate_messages(session_id)
 
 
@@ -268,23 +273,24 @@ async def get_session_owner(session_id: str) -> int | None:
     return rows[0]["user_id"] if rows else None
 
 
-async def get_session_summary(session_id: str) -> tuple[str, int] | None:
-    """读取会话摘要缓存（压缩点之后的消息 id）。返回 (summary, compressed_before) 或 None。"""
+async def get_session_summary(session_id: str) -> tuple[str, str] | None:
+    """读取会话摘要缓存。返回 (summary, fold_key)；fold_key 为摘要覆盖到的
+    最后一条折叠消息的稳定 msg_id（替代易漂移的 rowid，见 IMPROVEMENTS.md A3）。"""
     rows = await db.run(
-        "SELECT summary, compressed_before FROM sessions WHERE id=?", (session_id,)
+        "SELECT summary, fold_msg_id FROM sessions WHERE id=?", (session_id,)
     )
     if not rows:
         return None
     summary = rows[0]["summary"]
-    before = rows[0]["compressed_before"]
+    fold_key = rows[0]["fold_msg_id"]
     if not summary:
         return None
-    return summary, int(before)
+    return summary, fold_key
 
 
-async def set_session_summary(session_id: str, summary: str, compressed_before: int) -> None:
-    """落库本轮生成的摘要与其压缩截止消息 id（下次裁剪起点不再重复生成）。"""
+async def set_session_summary(session_id: str, summary: str, fold_key: str) -> None:
+    """落库本轮生成的摘要与其折叠截止 msg_id（下次折叠点未前移时不重复生成）。"""
     await db.execute(
-        "UPDATE sessions SET summary=?, compressed_before=? WHERE id=?",
-        (summary, int(compressed_before), session_id),
+        "UPDATE sessions SET summary=?, fold_msg_id=? WHERE id=?",
+        (summary, fold_key, session_id),
     )

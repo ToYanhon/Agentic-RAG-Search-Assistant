@@ -17,7 +17,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 from app.agent.context_manager import ContextManager
@@ -38,9 +38,25 @@ from app.prompt.prompts import build_supervisor_prompt, build_worker_prompt
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 6  # 单个 worker 内最大工具循环次数（防失控）
+# supervisor 最大 worker 转移/协作次数：LLM 反复 transfer ping-pong 时截断，
+# 防止每次转移都触发完整 ReAct 循环导致成本/延迟失控（IMPROVEMENTS.md A4）
+MAX_SUPERVISOR_ROUNDS = 3
 
 # 疑似 API Key（sk-…）正则，错误摘要里剥掉防泄露
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{6,}")
+
+# 工具结果不可信边界（防间接提示词注入，IMPROVEMENTS.md A1）：
+# 工具返回（文件/网页/检索片段）属不可信外部数据，包进定界符并声明，
+# 内容中出现的结束标记会被转义，防止注入方伪造边界。
+_UNTRUSTED_START = "«untrusted_tool_result»"
+_UNTRUSTED_END = "«/untrusted_tool_result»"
+_UNTRUSTED_END_ESCAPED = "«/untrusted_tool_result_escaped»"
+
+
+def _wrap_tool_result(content: str) -> str:
+    """把工具结果包进不可信数据边界；内容中出现的结束标记一律转义。"""
+    safe = content.replace(_UNTRUSTED_END, _UNTRUSTED_END_ESCAPED)
+    return f"{_UNTRUSTED_START}\n{safe}\n{_UNTRUSTED_END}"
 
 
 def _sanitize_error(e: Exception) -> str:
@@ -239,7 +255,32 @@ class AgentWorkflow:
         sup = self._llm(TRANSFER_TOOLS)
         # worker 完成且已输出文本答复时，抑制 supervisor 收尾复述（避免重复内容）
         worker_spoke = False
+        transfers = 0
         while True:
+            # 达到最大协作轮次：不再转移，直接收尾（成本上限）
+            if transfers >= MAX_SUPERVISOR_ROUNDS:
+                if worker_spoke:
+                    return  # 最近 worker 的文本即最终答复（复述不入历史）
+                # 最近 worker 无文本：supervisor 不带转移工具强制给最终答复
+                wrap = self._llm([])
+                wrap_out: list = []
+                async for text in self._stream_llm(
+                    wrap,
+                    [SystemMessage(content=build_supervisor_prompt())] + messages,
+                    usage,
+                    wrap_out,
+                ):
+                    if text:
+                        yield {"type": "text", "content": text}
+                final = wrap_out[0]
+                if not (final.content and isinstance(final.content, str)):
+                    # 防御：模型仍无文本（如只回工具调用）→ 兜底文案
+                    final = AIMessage(
+                        content="已达到本轮协作上限，未能继续处理；请重新表述您的需求。"
+                    )
+                    yield {"type": "text", "content": final.content}
+                messages.append(final)
+                return
             out: list = []
             if worker_spoke:
                 # 仅取 supervisor 的 tool_calls 判断是否需再次转移，不流式复述文本
@@ -271,6 +312,7 @@ class AgentWorkflow:
             if target not in WORKER_NAMES:
                 return
             worker_spoke = False
+            transfers += 1
             # 转移工具执行结果落一条 ToolMessage（与旧 langgraph transfer 节点语义一致）
             tid = calls[0].get("id") or uuid.uuid4().hex
             messages.append(
@@ -320,7 +362,9 @@ class AgentWorkflow:
                 yield {"type": "tool_end", "name": tname, "result": str(result)[:300]}
                 messages.append(
                     ToolMessage(
-                        content=str(result), tool_call_id=tid, id=uuid.uuid4().hex
+                        content=_wrap_tool_result(str(result)),
+                        tool_call_id=tid,
+                        id=uuid.uuid4().hex,
                     )
                 )
 

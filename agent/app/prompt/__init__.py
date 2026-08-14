@@ -10,6 +10,7 @@ from app.prompt.prompts import (  # noqa: F401
     SKILL_CONTEXT_GUARD,
     SUMMARIZE_PROMPT,
     SUPERVISOR_SYSTEM_PROMPT,
+    TOOL_RESULT_GUARD,
     WORKER_PROMPTS,
     build_supervisor_prompt,
     build_worker_prompt,

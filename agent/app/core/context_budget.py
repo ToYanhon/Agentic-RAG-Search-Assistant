@@ -36,16 +36,16 @@ def _budget_tokens(window: int) -> int:
 
 
 class _Group:
-    __slots__ = ("msgs", "rows", "tokens")
+    __slots__ = ("msgs", "tokens")
 
     def __init__(self, msgs: list[dict]):
         self.msgs = msgs
         self.tokens = sum(estimate_tokens(m.get("content", "")) for m in msgs)
-        self.rows = [r for m in msgs if isinstance((r := m.get("rowid")), int)]
 
     @property
-    def max_row(self) -> int | None:
-        return max(self.rows) if self.rows else None
+    def last_msg_id(self) -> str | None:
+        """组内最后一条消息的稳定 msg_id（折叠键候选；未落库消息可能缺失）。"""
+        return self.msgs[-1].get("id") or None
 
 
 def _group_history(history: list[dict]) -> list[_Group]:
@@ -201,22 +201,20 @@ async def build_context(
     summary_text = ""
 
     if dropped_msgs:
-        mrs: list[int] = []
-        for g in dropped_groups:
-            mr = g.max_row
-            if mr is not None:
-                mrs.append(mr)
-        fold_max = max(mrs, default=None)
+        # 折叠键 = 被折叠区最新一条消息的稳定 msg_id（精确匹配）：
+        # 折叠点未前移 → 缓存命中复用；前移 → 以「上轮摘要 + 本轮新折叠段」重写。
+        # 不能用 rowid：replace_messages 每轮 DELETE+INSERT 使其单调漂移（A3）。
+        fold_key = dropped_groups[0].last_msg_id
         cached = None
-        if session_id:
+        if session_id and fold_key:
             from app.service import session_service
 
             try:
                 cached = await session_service.get_session_summary(session_id)
             except Exception:  # noqa: BLE001 - 缓存读失败降级为无摘要
                 cached = None
-        # 缓存已覆盖本轮折叠点 → 复用；否则以上一轮累积摘要 + 本轮新折叠段重写生成
-        if cached is not None and cached[1] >= (fold_max or 0) and cached[0]:
+        # 缓存折叠键与当前一致 → 复用；否则以上一轮累积摘要 + 本轮新折叠段重写生成
+        if cached is not None and cached[1] == fold_key and cached[0]:
             summary_text = cached[0]
             summary_used = True
         else:
@@ -231,10 +229,10 @@ async def build_context(
                 summary_text, summary_usage = gen
                 summary_used = True
                 summary_generated = True
-                if session_id:
+                if session_id and fold_key:
                     try:
                         await session_service.set_session_summary(
-                            session_id, summary_text, fold_max or 0
+                            session_id, summary_text, fold_key
                         )
                     except Exception:
                         logger.exception("failed to persist summary cache")

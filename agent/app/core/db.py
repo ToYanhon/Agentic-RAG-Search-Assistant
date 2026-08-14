@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   cost_yuan REAL NOT NULL DEFAULT 0,
   model TEXT NOT NULL DEFAULT '',
   summary TEXT NOT NULL DEFAULT '',
-  compressed_before INTEGER NOT NULL DEFAULT 0
+  compressed_before INTEGER NOT NULL DEFAULT 0,
+  fold_msg_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
 
@@ -62,6 +63,9 @@ def _connect() -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
+    # autocommit：单条写语句立即落盘（与原先「每次 execute 即 commit」语义一致），
+    # 同时允许 execute_tx 用显式 BEGIN/COMMIT 构建真实事务。
+    conn.isolation_level = None
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
@@ -72,6 +76,12 @@ def init_db() -> None:
     conn = _get_conn()
     conn.executescript(SCHEMA)
     conn.commit()
+    # 存量库迁移：补 fold_msg_id 列（摘要折叠缓存的稳定折叠键，见 context_budget）
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN fold_msg_id TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # 列已存在
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -129,3 +139,35 @@ async def execute_many(query: str, seq: list[tuple]) -> int:
 
     async with _lock:
         return await asyncio.to_thread(_exec)
+
+
+async def execute_tx(ops: list[tuple]) -> None:
+    """在一个显式事务内顺序执行多条写操作，全部成功或全部回滚（原子）。
+
+    ops 元素为 (sql, args) 走 conn.execute，或 (sql, seq, True) 走 conn.executemany。
+    任一步抛错即 ROLLBACK 并向上抛出（调用方可重试）；不留下半状态。
+    """
+    conn = _get_conn()
+
+    def _exec():
+        conn.execute("BEGIN")
+        try:
+            for op in ops:
+                if len(op) == 3:
+                    sql, seq, is_many = op
+                    if is_many:
+                        conn.executemany(sql, seq)
+                        continue
+                else:
+                    sql, args = op
+                conn.execute(sql, args)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+    async with _lock:
+        await asyncio.to_thread(_exec)
