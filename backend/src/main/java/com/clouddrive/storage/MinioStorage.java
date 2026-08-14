@@ -25,6 +25,7 @@ import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -73,6 +74,12 @@ public class MinioStorage {
 
     public ResponseInputStream<?> download(String objectKey) {
         return client.getObject(GetObjectRequest.builder().bucket(bucket).key(objectKey).build());
+    }
+
+    /** 实测对象字节数（服务端权威值，用于分块上传 complete 前校验实际分块总和）。 */
+    public long headObjectSize(String objectKey) {
+        return client.headObject(HeadObjectRequest.builder().bucket(bucket).key(objectKey).build())
+                .contentLength();
     }
 
     public void delete(String objectKey) {

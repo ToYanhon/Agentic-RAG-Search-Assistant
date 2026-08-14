@@ -63,7 +63,8 @@ public class FileService {
         if (user.getStorageUsed() + data.length > user.getStorageLimit()) {
             throw AppException.storageExceeded("storage limit exceeded");
         }
-        String name = uniqueName(ownerId, folderId, originalName, 0L);
+        Long folder = validateFolder(ownerId, folderId);
+        String name = uniqueName(ownerId, folder, originalName, 0L);
         String md5 = md5Hex(data);
         String objectKey = objectKey(ownerId, name);
         try {
@@ -77,7 +78,7 @@ public class FileService {
         f.setMimeType(contentType);
         f.setMd5(md5);
         f.setObjectKey(objectKey);
-        f.setFolderId(folderId);
+        f.setFolderId(folder);
         f.setOwnerId(ownerId);
         try {
             fileRepo.save(f);
@@ -125,7 +126,8 @@ public class FileService {
         if (user.getStorageUsed() + size > user.getStorageLimit()) {
             throw AppException.storageExceeded("storage limit exceeded");
         }
-        String unique = uniqueName(ownerId, folderId, name, 0L);
+        Long folder = validateFolder(ownerId, folderId);
+        String unique = uniqueName(ownerId, folder, name, 0L);
         String objectKey = objectKey(ownerId, unique);
         try {
             storage.copyObject(src.getObjectKey(), objectKey);
@@ -138,7 +140,7 @@ public class FileService {
         f.setMimeType(src.getMimeType());
         f.setMd5(src.getMd5());
         f.setObjectKey(objectKey);
-        f.setFolderId(folderId);
+        f.setFolderId(folder);
         f.setOwnerId(ownerId);
         try {
             fileRepo.save(f);
@@ -389,14 +391,36 @@ public class FileService {
     }
 
     public List<FileRecord> listByFolder(Long folderId, Long ownerId) {
-        return fileRepo.findByFolderIdOrderByCreatedAtDesc(folderId);
+        return fileRepo.findByFolderIdAndOwnerIdOrderByCreatedAtDesc(folderId, ownerId);
     }
 
     public FileRecord getFileById(Long id) {
         return fileRepo.findById(id).orElseThrow(() -> AppException.notFound("resource not found"));
     }
 
+    /** 按 ID 取文件并校验 owner（供用户侧元数据接口；公开分享走无校验的 getFileById(id)）。 */
+    public FileRecord getFileById(Long id, Long ownerId) {
+        FileRecord f = getFileById(id);
+        if (!f.getOwnerId().equals(ownerId)) {
+            throw AppException.forbidden("access denied");
+        }
+        return f;
+    }
+
     // ---------- 工具 ----------
+
+    /** 校验目标文件夹存在且属于当前用户（与 move 一致）：null/0 归一为根目录(null)。 */
+    public Long validateFolder(Long ownerId, Long folderId) {
+        if (folderId == null || folderId == 0) {
+            return null;
+        }
+        Folder folder = folderRepo.findById(folderId)
+                .orElseThrow(() -> AppException.badRequest("target folder not found"));
+        if (!folder.getOwnerId().equals(ownerId)) {
+            throw AppException.forbidden("access denied");
+        }
+        return folderId;
+    }
 
     /** 同文件夹内不重名：自动追加/递增序号（foo.txt → foo(1).txt）。 */
     public String uniqueName(Long ownerId, Long folderId, String name, Long excludeId) {

@@ -140,8 +140,8 @@ public class FileController {
     }
 
     @GetMapping("/{id}")
-    public Resp<FileInfo> get(@PathVariable Long id) {
-        return Resp.ok(FileInfo.from(fileService.getFileById(id)));
+    public Resp<FileInfo> get(@PathVariable Long id, HttpServletRequest request) {
+        return Resp.ok(FileInfo.from(fileService.getFileById(id, userId(request))));
     }
 
     @PostMapping("/checksum")

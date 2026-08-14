@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -16,8 +17,10 @@ import org.junit.jupiter.api.Test;
 
 import com.clouddrive.common.AppException;
 import com.clouddrive.entity.FileRecord;
+import com.clouddrive.entity.Folder;
 import com.clouddrive.entity.User;
 import com.clouddrive.repository.FileRepository;
+import com.clouddrive.repository.FolderRepository;
 import com.clouddrive.repository.UserRepository;
 import com.clouddrive.service.AgentNotifier;
 import com.clouddrive.service.CacheService;
@@ -29,18 +32,22 @@ import com.clouddrive.storage.MinioStorage;
 class FileServiceTest {
 
     private FileRepository fileRepo;
+    private FolderRepository folderRepo;
     private UserRepository userRepo;
     private MinioStorage storage;
     private AgentNotifier notifier;
+    private CacheService cache;
     private FileService svc;
 
     @BeforeEach
     void setUp() {
         fileRepo = mock(FileRepository.class);
+        folderRepo = mock(FolderRepository.class);
         userRepo = mock(UserRepository.class);
         storage = mock(MinioStorage.class);
         notifier = mock(AgentNotifier.class);
-        svc = new FileService(fileRepo, null, userRepo, storage, mock(CacheService.class), notifier);
+        cache = mock(CacheService.class);
+        svc = new FileService(fileRepo, folderRepo, userRepo, storage, cache, notifier);
     }
 
     private void nameFree() {
@@ -271,5 +278,115 @@ class FileServiceTest {
         FileService.ContentView view = svc.readContent(10L, 1L, 99, 10);
         assertThat(view.content()).isEqualTo("");
         assertThat(view.totalLines()).isEqualTo(2);
+    }
+
+    // ---------- getFileById owner 校验（B1） ----------
+
+    @Test
+    void getFileByIdScopedToOwner() {
+        FileRecord f = ownedFile(9L, 1L, 5);
+        when(fileRepo.findById(9L)).thenReturn(Optional.of(f));
+
+        assertThat(svc.getFileById(9L, 1L)).isSameAs(f);
+    }
+
+    @Test
+    void getFileByIdRejectsNonOwner() {
+        when(fileRepo.findById(9L)).thenReturn(Optional.of(ownedFile(9L, 2L, 5)));
+
+        assertThatThrownBy(() -> svc.getFileById(9L, 1L))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("access denied");
+    }
+
+    @Test
+    void getFileByIdNotFound() {
+        when(fileRepo.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> svc.getFileById(99L, 1L))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("not found");
+    }
+
+    // ---------- 文件夹归属校验（B2） ----------
+
+    private Folder folder(Long id, Long owner) {
+        Folder f = new Folder();
+        f.setId(id);
+        f.setOwnerId(owner);
+        return f;
+    }
+
+    private void cacheEmpty() {
+        when(cache.get(anyString(), any())).thenReturn(Optional.empty());
+    }
+
+    @Test
+    void uploadRejectsForeignFolder() {
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(folderRepo.findById(5L)).thenReturn(Optional.of(folder(5L, 2L)));
+
+        assertThatThrownBy(() -> svc.upload(1L, new byte[1], "a.txt", 5L, "text/plain"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("access denied");
+        verify(storage, never()).upload(anyString(), any(), anyLong(), anyString());
+    }
+
+    @Test
+    void uploadRejectsMissingFolder() {
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(folderRepo.findById(5L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> svc.upload(1L, new byte[1], "a.txt", 5L, "text/plain"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("target folder not found");
+    }
+
+    @Test
+    void uploadAcceptsOwnFolder() {
+        nameFree();
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(folderRepo.findById(5L)).thenReturn(Optional.of(folder(5L, 1L)));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        FileRecord out = svc.upload(1L, new byte[3], "a.txt", 5L, "text/plain");
+
+        assertThat(out.getFolderId()).isEqualTo(5L);
+        verify(storage).upload(anyString(), any(), anyLong(), anyString());
+    }
+
+    @Test
+    void uploadNormalizesRootFolderToNull() {
+        nameFree();
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        FileRecord zero = svc.upload(1L, new byte[3], "a.txt", 0L, "text/plain");
+        FileRecord none = svc.upload(1L, new byte[3], "b.txt", null, "text/plain");
+
+        assertThat(zero.getFolderId()).isNull();
+        assertThat(none.getFolderId()).isNull();
+        verify(folderRepo, never()).findById(anyLong());
+    }
+
+    @Test
+    void checksumInstantRejectsForeignFolder() {
+        cacheEmpty();
+        when(fileRepo.findFirstByMd5AndOwnerId("abc", 1L)).thenReturn(Optional.of(ownedFile(9L, 1L, 10)));
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(folderRepo.findById(5L)).thenReturn(Optional.of(folder(5L, 2L)));
+
+        assertThatThrownBy(() -> svc.checksumInstant(1L, "abc", "a.txt", 10L, 5L))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("access denied");
+        verify(storage, never()).copyObject(anyString(), anyString());
+    }
+
+    @Test
+    void listByFolderScopesToOwner() {
+        svc.listByFolder(5L, 1L);
+
+        verify(fileRepo).findByFolderIdAndOwnerIdOrderByCreatedAtDesc(5L, 1L);
+        verify(fileRepo, never()).findByFolderIdOrderByCreatedAtDesc(anyLong());
     }
 }

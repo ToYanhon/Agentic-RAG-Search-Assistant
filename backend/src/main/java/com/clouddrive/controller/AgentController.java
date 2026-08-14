@@ -42,7 +42,11 @@ public class AgentController {
     private static final Set<String> HOP_BY_HOP = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
-            "expect"); // expect 是 Java HttpClient 的受限头，复制会抛异常
+            "expect", // expect 是 Java HttpClient 的受限头，复制会抛异常
+            // 敏感/内部头一律不透传入站请求：由代理按后端计算结果注入，
+            // 防止恶意入站 X-User-Id/X-LLM-* 等以「双头取首」击穿信任链（B3）。
+            "x-user-id", "x-agent-token", "x-llm-provider", "x-llm-base-url",
+            "x-llm-key", "x-llm-model", "x-tavily-key");
 
     private final AgentClient agentClient;
     private final LLMConfigService llmCfg;
@@ -222,6 +226,9 @@ public class AgentController {
         if (provider == null || provider.isEmpty()) {
             provider = "openai";
         }
+        // provider 已被加入 HOP_BY_HOP 跳过列表，这里按后端解析结果重新注入，
+        // 保证 agent 侧 LLMOverride.provider 与 Base-URL/Key/Model 一致。
+        builder.header("X-LLM-Provider", provider);
         LLMConfigService.ResolveResult r = llmCfg.resolve(userId, provider);
         if (r.ok()) {
             if (r.baseUrl() != null && !r.baseUrl().isEmpty()) {

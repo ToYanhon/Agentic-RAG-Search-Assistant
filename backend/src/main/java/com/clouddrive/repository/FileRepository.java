@@ -19,6 +19,8 @@ public interface FileRepository extends JpaRepository<FileRecord, Long> {
 
     List<FileRecord> findByFolderIdOrderByCreatedAtDesc(Long folderId);
 
+    List<FileRecord> findByFolderIdAndOwnerIdOrderByCreatedAtDesc(Long folderId, Long ownerId);
+
     List<FileRecord> findByOwnerIdOrderByCreatedAtDesc(Long ownerId);
 
     Optional<FileRecord> findFirstByMd5AndOwnerId(String md5, Long ownerId);

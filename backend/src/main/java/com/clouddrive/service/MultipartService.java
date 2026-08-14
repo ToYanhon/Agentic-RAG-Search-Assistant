@@ -77,6 +77,7 @@ public class MultipartService {
     @Transactional
     public MultipartMeta init(Long ownerId, String name, String mimeType, long size,
                               Long folderId, String md5, long chunkSize) {
+        Long folder = fileService.validateFolder(ownerId, folderId);
         int total = (int) ((size + chunkSize - 1) / chunkSize);
         if (total == 0) {
             total = 1;
@@ -94,7 +95,7 @@ public class MultipartService {
         meta.put("name", name);
         meta.put("size", String.valueOf(size));
         meta.put("mime_type", mimeType == null ? "" : mimeType);
-        meta.put("folder_id", folderId == null ? "0" : String.valueOf(folderId));
+        meta.put("folder_id", folder == null ? "0" : String.valueOf(folder));
         meta.put("md5", md5 == null ? "" : md5);
         meta.put("chunk_size", String.valueOf(chunkSize));
         meta.put("total_chunks", String.valueOf(total));
@@ -109,7 +110,7 @@ public class MultipartService {
         m.setName(name);
         m.setSize(size);
         m.setMimeType(mimeType);
-        m.setFolderId(folderId);
+        m.setFolderId(folder);
         m.setMd5(md5);
         m.setChunkSize(chunkSize);
         m.setTotalChunks(total);
@@ -213,6 +214,28 @@ public class MultipartService {
             throw AppException.internal("complete failed");
         }
         redis.delete(List.of(key(uid), partsKey(uid)));
+
+        // 实测合并后对象字节数：客户端声明的 size 不可信，须与真实分块总和一致，
+        // 否则（如声明 1MB 传 10MB 块）会绕过存储配额并污染元数据。
+        long actual;
+        try {
+            actual = storage.headObjectSize(meta.getObjectKey());
+        } catch (Exception e) {
+            log.warn("multipart headObject failed, cleaning up uid={}", uid, e);
+            try {
+                storage.delete(meta.getObjectKey());
+            } catch (Exception ignored) {
+            }
+            throw AppException.internal("complete failed");
+        }
+        if (actual != meta.getSize()) {
+            log.warn("multipart size mismatch declared={} actual={} uid={}", meta.getSize(), actual, uid);
+            try {
+                storage.delete(meta.getObjectKey());
+            } catch (Exception ignored) {
+            }
+            throw AppException.badRequest("uploaded bytes mismatch declared size");
+        }
 
         FileRecord f = new FileRecord();
         f.setName(name);
