@@ -60,3 +60,45 @@ def test_edit_multiple_match_rejected(monkeypatch):
     finally:
         T.current_user_id.reset(tok)
     assert "需唯一匹配" in r
+
+
+def test_create_file_rejects_invalid_names(monkeypatch):
+    """A23：非法文件名直接拒绝，不发起请求。"""
+    called = []
+
+    async def fake_send(method, path, params, json=None, retries=2):
+        called.append(path)
+        return None
+
+    monkeypatch.setattr(T, "_http_send", fake_send)
+    tok = T.current_user_id.set(1)
+    try:
+        for bad in ["../evil.txt", "a/b.txt", "a\\b.txt", " x.txt", "x\x00y.txt"]:
+            r = _run(T.create_file.ainvoke({"name": bad, "content": "x"}))
+            assert "创建失败" in r, bad
+    finally:
+        T.current_user_id.reset(tok)
+    assert called == []  # 非法名不发起请求
+
+
+def test_create_file_valid_name_calls_send(monkeypatch):
+    class _Resp201:
+        status_code = 201
+
+        def json(self):
+            return {"data": {"id": 7, "name": "ok.txt"}}
+
+    seen = {}
+
+    async def fake_send(method, path, params, json=None, retries=2):
+        seen.update(method=method, path=path, json=json)
+        return _Resp201()
+
+    monkeypatch.setattr(T, "_http_send", fake_send)
+    tok = T.current_user_id.set(1)
+    try:
+        r = _run(T.create_file.ainvoke({"name": "ok.txt", "content": "hi"}))
+    finally:
+        T.current_user_id.reset(tok)
+    assert "已创建文件 7" in r
+    assert seen["method"] == "POST" and seen["path"] == "/files/text"

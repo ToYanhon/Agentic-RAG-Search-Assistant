@@ -7,11 +7,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.clouddrive.common.AppException;
 import com.clouddrive.entity.FileRecord;
@@ -26,6 +30,7 @@ import lombok.Data;
 /**
  * 分块上传（对齐 Go multipartService）：基于 MinIO 原生 S3 multipart，
  * 元数据与已收分块 etag 存 Redis Hash（24h TTL，每次收块刷新）。
+ * 配额：init 预检（D3）+ complete 原子预占（D1）；落库冲突换名重试（D4）；成功通知建索引（D8）。
  */
 @Service
 public class MultipartService {
@@ -40,16 +45,22 @@ public class MultipartService {
     private final StringRedisTemplate redis;
     private final FileService fileService;
     private final CacheService cache;
+    private final AgentNotifier notifier;
+    private final TransactionTemplate tx;
 
     public MultipartService(FileRepository fileRepo, UserRepository userRepo,
                             MinioStorage storage, StringRedisTemplate redis,
-                            FileService fileService, CacheService cache) {
+                            FileService fileService, CacheService cache,
+                            AgentNotifier notifier,
+                            PlatformTransactionManager txManager) {
         this.fileRepo = fileRepo;
         this.userRepo = userRepo;
         this.storage = storage;
         this.redis = redis;
         this.fileService = fileService;
         this.cache = cache;
+        this.notifier = notifier;
+        this.tx = new TransactionTemplate(txManager);
     }
 
     @Data
@@ -64,6 +75,8 @@ public class MultipartService {
         private int totalChunks;
         private String objectKey;
         private String uploadId;
+        /** 发起时剩余可用配额（字节，D3 预检返回）。 */
+        private long remaining;
     }
 
     private static String key(String uid) {
@@ -82,7 +95,15 @@ public class MultipartService {
         if (total == 0) {
             total = 1;
         }
-        String objectKey = "users/" + ownerId + "/" + System.nanoTime() + "-" + name;
+        // D3：init 即预检配额，避免为注定无法 complete 的上传白占 MinIO multipart 资源
+        User user = userRepo.findById(ownerId)
+                .orElseThrow(() -> AppException.internal("owner not found"));
+        long remaining = user.getStorageLimit() - user.getStorageUsed();
+        if (size > remaining) {
+            throw AppException.storageExceeded("storage limit exceeded");
+        }
+        // objectKey 与文件名解耦（D4）：冲突换名重试无需重建对象
+        String objectKey = FileService.objectKey(ownerId);
         String uploadId;
         try {
             uploadId = storage.createMultipartUpload(objectKey, mimeType);
@@ -116,6 +137,7 @@ public class MultipartService {
         m.setTotalChunks(total);
         m.setObjectKey(objectKey);
         m.setUploadId(uploadId);
+        m.setRemaining(remaining);
         return m;
     }
 
@@ -176,8 +198,7 @@ public class MultipartService {
                 .collect(Collectors.toList());
     }
 
-    /** 校验分块齐全后合并，建 File 记录并扣减配额。 */
-    @Transactional
+    /** 校验分块齐全后合并，建 File 记录并原子预占配额。 */
     public FileRecord complete(String uid, Long ownerId) {
         MultipartMeta meta = getMeta(uid);
         if (!meta.getOwnerId().equals(ownerId)) {
@@ -197,7 +218,6 @@ public class MultipartService {
         if (user.getStorageUsed() + meta.getSize() > user.getStorageLimit()) {
             throw AppException.storageExceeded("storage limit exceeded");
         }
-        String name = fileService.uniqueName(ownerId, meta.getFolderId(), meta.getName(), 0L);
 
         List<CompletedPart> completeParts = new ArrayList<>();
         for (int i = 0; i < meta.getTotalChunks(); i++) {
@@ -213,7 +233,6 @@ public class MultipartService {
             log.warn("multipart complete failed", e);
             throw AppException.internal("complete failed");
         }
-        redis.delete(List.of(key(uid), partsKey(uid)));
 
         // 实测合并后对象字节数：客户端声明的 size 不可信，须与真实分块总和一致，
         // 否则（如声明 1MB 传 10MB 块）会绕过存储配额并污染元数据。
@@ -226,6 +245,7 @@ public class MultipartService {
                 storage.delete(meta.getObjectKey());
             } catch (Exception ignored) {
             }
+            redis.delete(List.of(key(uid), partsKey(uid)));
             throw AppException.internal("complete failed");
         }
         if (actual != meta.getSize()) {
@@ -234,9 +254,36 @@ public class MultipartService {
                 storage.delete(meta.getObjectKey());
             } catch (Exception ignored) {
             }
+            redis.delete(List.of(key(uid), partsKey(uid)));
             throw AppException.badRequest("uploaded bytes mismatch declared size");
         }
 
+        FileRecord saved;
+        try {
+            saved = withUniqueRetry(() -> completeSave(ownerId, meta));
+        } catch (RuntimeException e) {
+            // 配额预占/落库失败（含重试耗尽）：清理已合并对象与 Redis 元数据
+            try {
+                storage.delete(meta.getObjectKey());
+            } catch (Exception ignored) {
+            }
+            redis.delete(List.of(key(uid), partsKey(uid)));
+            throw e;
+        }
+        // Redis 元数据在落库成功后清理，保证冲突重试时可复用（D4）
+        redis.delete(List.of(key(uid), partsKey(uid)));
+        cache.del(FileService.profileKey(ownerId), FileService.checksumKey(ownerId, meta.getMd5()));
+        // 分块上传完成即通知建索引（尽力而为；D8）
+        notifier.notifyReindex(saved.getId(), saved.getOwnerId());
+        return saved;
+    }
+
+    /** complete 落库（在 withUniqueRetry 的独立事务内执行）：原子预占配额 + 建记录。 */
+    private FileRecord completeSave(Long ownerId, MultipartMeta meta) {
+        String name = fileService.uniqueName(ownerId, meta.getFolderId(), meta.getName(), 0L);
+        if (userRepo.tryAddStorageUsed(ownerId, meta.getSize()) == 0) {
+            throw AppException.storageExceeded("storage limit exceeded");
+        }
         FileRecord f = new FileRecord();
         f.setName(name);
         f.setSize(meta.getSize());
@@ -245,18 +292,21 @@ public class MultipartService {
         f.setObjectKey(meta.getObjectKey());
         f.setFolderId(meta.getFolderId());
         f.setOwnerId(ownerId);
-        try {
-            fileRepo.save(f);
-        } catch (Exception e) {
+        return fileRepo.save(f);
+    }
+
+    /** 独立事务执行；唯一索引冲突（并发重名，D4）时换名重试一次。 */
+    private <T> T withUniqueRetry(Supplier<T> work) {
+        for (int attempt = 0; ; attempt++) {
             try {
-                storage.delete(meta.getObjectKey());
-            } catch (Exception ignored) {
+                return tx.execute(status -> work.get());
+            } catch (DataIntegrityViolationException e) {
+                if (attempt == 0) {
+                    continue;
+                }
+                throw e;
             }
-            throw AppException.internal("create file record failed");
         }
-        userRepo.addStorageUsed(ownerId, meta.getSize());
-        cache.del(FileService.profileKey(ownerId), FileService.checksumKey(ownerId, meta.getMd5()));
-        return f;
     }
 
     @Transactional

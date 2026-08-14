@@ -2,6 +2,7 @@ package com.clouddrive.storage;
 
 import java.io.InputStream;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +24,7 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
@@ -40,6 +42,9 @@ import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 public class MinioStorage {
 
     private static final Logger log = LoggerFactory.getLogger(MinioStorage.class);
+
+    /** S3 DeleteObjects 单请求上限（AWS 硬限制 1000）。 */
+    private static final int DELETE_BATCH = 1000;
 
     private final S3Client client;
     private final String bucket;
@@ -90,13 +95,23 @@ public class MinioStorage {
         if (objectKeys.isEmpty()) {
             return;
         }
-        List<ObjectIdentifier> ids = objectKeys.stream()
-                .map(k -> ObjectIdentifier.builder().key(k).build())
-                .toList();
-        client.deleteObjects(DeleteObjectsRequest.builder()
-                .bucket(bucket)
-                .delete(Delete.builder().objects(ids).build())
-                .build());
+        // 单请求上限 1000：按 1000 分页循环；响应 errors 仅告警，不阻断记录删除（D6）
+        for (int i = 0; i < objectKeys.size(); i += DELETE_BATCH) {
+            List<String> batch = objectKeys.subList(i, Math.min(i + DELETE_BATCH, objectKeys.size()));
+            List<ObjectIdentifier> ids = batch.stream()
+                    .map(k -> ObjectIdentifier.builder().key(k).build())
+                    .toList();
+            DeleteObjectsResponse resp = client.deleteObjects(DeleteObjectsRequest.builder()
+                    .bucket(bucket)
+                    .delete(Delete.builder().objects(ids).build())
+                    .build());
+            if (resp.hasErrors()) {
+                String failed = resp.errors().stream()
+                        .map(e -> e.key() + "(" + e.code() + ")")
+                        .collect(Collectors.joining(", "));
+                log.warn("minio deleteObjects partial failure: {}", failed);
+            }
+        }
     }
 
     /** 服务端拷贝到新 key（秒传省带宽，每条记录独立对象，删除互不影响）。 */

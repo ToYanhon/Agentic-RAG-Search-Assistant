@@ -42,6 +42,9 @@ public class AgentNotifier {
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
+            // 强制 HTTP/1.1：默认 HTTP/2 会对明文连接发起 h2c upgrade（uvicorn 不支持会拒收），
+            // Redis 入队失败的回退直发必须与 AgentClient 一致（IMPROVEMENTS.md D5）
+            .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(10)).build();
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "agent-notifier-fallback");

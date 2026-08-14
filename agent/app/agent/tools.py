@@ -14,10 +14,10 @@ from typing import Any, TypeVar
 import httpx
 from langchain_core.tools import tool
 
-from app.auth_token import get_internal_token, reset_token_cache
+from app.auth_token import get_internal_token
 from app.config import settings
 from app.core.embedding import searcher
-from app.core.metrics import now, tool_calls, tool_latency
+from app.core.http import get_http_client
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
@@ -33,22 +33,30 @@ TAVILY_ENDPOINT = "https://api.tavily.com/search"
 TAVILY_MAX_RESULTS = 5
 
 
+def _valid_filename(name: str) -> bool:
+    """文件名合法性（A23）：非空、无首尾空白、不含路径分隔符/`..`/空字节。"""
+    if not name or name.strip() != name:
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    if ".." in name:
+        return False
+    return True
+
+
 def safe_tool(func: F) -> F:
-    """工具执行兜底：异常转为错误字符串，避免中断 Agent 流程；同时打点。"""
+    """工具执行兜底：异常转为错误字符串，避免中断 Agent 流程。
+
+    指标（tool_calls/tool_latency）由 ToolManager.execute 统一记录，
+    此处不再打点，避免与 manager 双层计数（IMPROVEMENTS.md A11）。
+    """
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        labels = {"name": func.__name__}
-        start = now()
         try:
-            result = await func(*args, **kwargs)
-            tool_calls.inc(1, {**labels, "status": "success"})
-            return result
+            return await func(*args, **kwargs)
         except Exception as e:  # noqa: BLE001 - 工具层需要兜住一切异常
-            tool_calls.inc(1, {**labels, "status": "error"})
             return f"[工具执行失败: {type(e).__name__}: {e}]"
-        finally:
-            tool_latency.observe(now() - start, labels)
 
     return wrapper  # type: ignore[return-value]
 
@@ -60,22 +68,25 @@ async def _http_get(path: str, params: dict, retries: int = 2) -> httpx.Response
     最终失败返回 None。
     """
     token = await get_internal_token()
+    client = await get_http_client()
     last: httpx.Response | None = None
     for attempt in range(retries + 2):
         try:
-            async with httpx.AsyncClient(
-                headers={"X-Agent-Token": token}, timeout=10.0, trust_env=False
-            ) as client:
-                resp = await client.get(f"{settings.backend_url}{path}", params=params)
-                if resp.status_code == 401:
-                    # 内部 token 可能已轮换：重置缓存取最新 token 重试一次
-                    token = await get_internal_token(force_refresh=True)
-                    if attempt == 0:
-                        continue
-                    return resp
-                if resp.status_code < 500:
-                    return resp
-                last = resp
+            resp = await client.get(
+                f"{settings.backend_url}{path}",
+                params=params,
+                headers={"X-Agent-Token": token},
+                timeout=10.0,
+            )
+            if resp.status_code == 401:
+                # 内部 token 可能已轮换：重置缓存取最新 token 重试一次
+                token = await get_internal_token(force_refresh=True)
+                if attempt == 0:
+                    continue
+                return resp
+            if resp.status_code < 500:
+                return resp
+            last = resp
         except httpx.HTTPError:
             last = None
         if attempt < retries:
@@ -87,22 +98,26 @@ async def _http_send(method: str, path: str, params: dict, json: dict | None = N
                      retries: int = 2) -> httpx.Response | None:
     """带超时与重试的 JSON 请求（POST/PUT 等，对齐 _http_get 的 token/重试/401 刷新逻辑）。"""
     token = await get_internal_token()
+    client = await get_http_client()
     last: httpx.Response | None = None
     for attempt in range(retries + 2):
         try:
-            async with httpx.AsyncClient(
-                headers={"X-Agent-Token": token}, timeout=15.0, trust_env=False
-            ) as client:
-                resp = await client.request(method, f"{settings.backend_url}{path}",
-                                            params=params, json=json)
-                if resp.status_code == 401:
-                    token = await get_internal_token(force_refresh=True)
-                    if attempt == 0:
-                        continue
-                    return resp
-                if resp.status_code < 500:
-                    return resp
-                last = resp
+            resp = await client.request(
+                method,
+                f"{settings.backend_url}{path}",
+                params=params,
+                json=json,
+                headers={"X-Agent-Token": token},
+                timeout=15.0,
+            )
+            if resp.status_code == 401:
+                token = await get_internal_token(force_refresh=True)
+                if attempt == 0:
+                    continue
+                return resp
+            if resp.status_code < 500:
+                return resp
+            last = resp
         except httpx.HTTPError:
             last = None
         if attempt < retries:
@@ -112,18 +127,19 @@ async def _http_send(method: str, path: str, params: dict, json: dict | None = N
 
 async def _tavily_search(query: str, api_key: str) -> dict | None:
     """调用 Tavily 搜索 API，返回原始 JSON；失败返回 None。"""
+    client = await get_http_client()
     try:
-        async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
-            resp = await client.post(
-                TAVILY_ENDPOINT,
-                json={
-                    "api_key": api_key,
-                    "query": query,
-                    "max_results": TAVILY_MAX_RESULTS,
-                    "search_depth": "basic",
-                    "include_answer": True,
-                },
-            )
+        resp = await client.post(
+            TAVILY_ENDPOINT,
+            json={
+                "api_key": api_key,
+                "query": query,
+                "max_results": TAVILY_MAX_RESULTS,
+                "search_depth": "basic",
+                "include_answer": True,
+            },
+            timeout=15.0,
+        )
     except httpx.HTTPError:
         return None
     if resp.status_code != 200:
@@ -287,6 +303,8 @@ async def write_file_content(file_id: int, content: str) -> str:
 @safe_tool
 async def create_file(name: str, content: str, folder_id: int = 0) -> str:
     """新建一个文本文件（仅用户自己的空间；name 为文件名，含扩展名，如 report.py）。"""
+    if not _valid_filename(name):
+        return "[创建失败: 文件名不能包含路径分隔符、.. 或控制字符]"
     uid = current_user_id.get()
     body: dict = {"name": name, "content": content}
     if folder_id > 0:

@@ -12,6 +12,7 @@ import logging
 
 from app.config import settings
 from app.core.llm_override import get_llm_override
+from app.core.metrics import llm_calls, llm_latency, now
 from app.prompt.prompts import SUMMARIZE_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,18 @@ SUMMARY_MAX_CHARS = 20_000
 
 
 def estimate_tokens(text: str) -> int:
-    """粗略估算：ASCII 每 4 字符 1 token，非 ASCII 每字符约 1 token，加 4 结构开销。"""
+    """粗略估算：ASCII 每 4 字符 1 token，非 ASCII 每字符约 1 token，加 4 结构开销。
+
+    超长文本（>4096 字符）改为前后抽样 2048 字符按比例估算，避免 O(n) 全量扫描阻塞
+    事件循环（IMPROVEMENTS.md A9）。
+    """
     t = text if isinstance(text, str) else str(text)
+    if len(t) > 4096:
+        sample = t[:2048] + t[-2048:]
+        n = len(sample)
+        asc = sum(1 for ch in sample if ord(ch) < 128)
+        avg = (asc / 4 + (n - asc)) / n
+        return max(4, int(len(t) * avg) + 4)
     asc = sum(1 for ch in t if ord(ch) < 128)
     return (len(t) - asc) + asc // 4 + 4
 
@@ -139,12 +150,21 @@ async def _generate_summary(prev_summary: str, msgs: list[dict]) -> tuple[str, d
             f"{m.get('role')}: {str(m.get('content', ''))[:SUMMARY_MAX_CHARS]}"
             for m in msgs
         )
-        result = await llm.ainvoke(
-            SUMMARIZE_PROMPT.format(
-                prev_summary=prev_summary or "（无）",
-                transcript=transcript[: SUMMARY_MAX_CHARS * 2],
+        labels = {"model": current_model()}
+        start = now()
+        try:
+            result = await llm.ainvoke(
+                SUMMARIZE_PROMPT.format(
+                    prev_summary=prev_summary or "（无）",
+                    transcript=transcript[: SUMMARY_MAX_CHARS * 2],
+                )
             )
-        )
+            llm_calls.inc(1, {**labels, "status": "success"})
+        except Exception:
+            llm_calls.inc(1, {**labels, "status": "error"})
+            raise
+        finally:
+            llm_latency.observe(now() - start, labels)
         um = getattr(result, "usage_metadata", None) or {}
         return str(result.content).strip(), {
             "input_tokens": int(um.get("input_tokens") or 0),
@@ -175,12 +195,12 @@ async def build_context(
     kept: list[_Group] = []
     dropped_groups: list[_Group] = []
     # 从最新往回贪心保留（新消息优先）：
-    # 1) 始终保留最近 context_keep_turns 组（近期上下文完整 + 前缀稳定利于缓存）
-    # 2) 更早的组按 token 预算保留，装不下的折叠进摘要
+    # 1) 最近 context_keep_turns 组优先保留（近期上下文完整 + 前缀稳定利于缓存）
+    # 2) 但同样受预算约束（A20：无条件保留可越预算）；装不下的折叠进摘要
     keep_turns = settings.context_keep_turns if hasattr(settings, "context_keep_turns") else 0
     recent = 0
     for g in reversed(groups):
-        if keep_turns > 0 and recent < keep_turns:
+        if keep_turns > 0 and recent < keep_turns and used + g.tokens <= budget:
             kept.append(g)
             used += g.tokens
             recent += 1
@@ -247,6 +267,8 @@ async def build_context(
                 "content": f"【对话摘要（含过往与最近进展）】{summary_text}",
             }
         )
+        # A20：摘要计入 token 估算（estimated_tokens 反映实际入上下文的全部内容）
+        used += estimate_tokens(f"【对话摘要（含过往与最近进展）】{summary_text}")
     for g in kept:
         messages.extend(g.msgs)
     messages.append({"role": "user", "content": human_text})

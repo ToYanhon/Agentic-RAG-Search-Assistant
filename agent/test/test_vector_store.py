@@ -163,3 +163,41 @@ def test_delete_file(monkeypatch):
         assert len(client.deleted) == 1
 
     run(main())
+
+
+def test_close_closes_client(monkeypatch):
+    """A16：close() 关闭客户端并复位，不再是从不调用的死方法。"""
+    client = _FakeClient()
+    _fresh(monkeypatch, client)
+    store._client = client  # 直接注入 client，验证 close 会调用其 close()
+
+    async def main():
+        await store.close()
+        assert client.closed is True
+        assert store._client is None
+        assert store._collection_ready is False
+
+    run(main())
+
+
+def test_set_embedding_size_used_on_create(monkeypatch):
+    """A17：新建 collection 用配置的 embedding 维度（默认 384）。"""
+    class _Cap(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.vectors_config = None
+
+        async def create_collection(self, name, vectors_config=None, sparse_vectors_config=None):
+            self.vectors_config = vectors_config
+            await super().create_collection(name, vectors_config=vectors_config, sparse_vectors_config=sparse_vectors_config)
+
+    client = _Cap()
+    _fresh(monkeypatch, client)
+    store.set_embedding_size(128)
+
+    async def main():
+        await store.ensure_collection()
+        assert client.vectors_config["dense"].size == 128
+
+    run(main())
+    store.set_embedding_size(vs.EMBEDDING_SIZE)  # 复位

@@ -18,7 +18,8 @@ async def skills_watch_loop() -> None:
     )
     while True:
         try:
-            sync_global()
+            # 目录扫描是同步文件 IO，放线程池避免阻塞事件循环（A9）
+            await asyncio.to_thread(sync_global)
         except Exception:  # noqa: BLE001 - 扫描失败仅记日志，下轮重试
             logger.exception("skills rescan failed")
         await asyncio.sleep(settings.skills_scan_interval_sec)

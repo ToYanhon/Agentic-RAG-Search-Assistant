@@ -7,13 +7,18 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
 
 import com.clouddrive.common.AppException;
 import com.clouddrive.entity.FileRecord;
@@ -27,7 +32,7 @@ import com.clouddrive.service.CacheService;
 import com.clouddrive.storage.MinioStorage;
 
 /**
- * FileService 单元测试：uniqueName 去重 + overwriteContent 覆盖写。
+ * FileService 单元测试：uniqueName 去重 + overwriteContent 覆盖写 + 配额原子预占（D1/D2）+ 重名重试（D4）。
  */
 class FileServiceTest {
 
@@ -47,7 +52,13 @@ class FileServiceTest {
         storage = mock(MinioStorage.class);
         notifier = mock(AgentNotifier.class);
         cache = mock(CacheService.class);
-        svc = new FileService(fileRepo, folderRepo, userRepo, storage, cache, notifier);
+        PlatformTransactionManager txManager = mock(PlatformTransactionManager.class);
+        when(txManager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
+        svc = new FileService(fileRepo, folderRepo, userRepo, storage, cache, notifier, txManager);
+    }
+
+    private void quotaOk() {
+        when(userRepo.tryAddStorageUsed(anyLong(), anyLong())).thenReturn(1);
     }
 
     private void nameFree() {
@@ -137,7 +148,12 @@ class FileServiceTest {
         FileRecord f = ownedFile(9L, 1L, 5);
         when(fileRepo.findById(9L)).thenReturn(Optional.of(f));
         when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
-        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+        quotaOk();
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
 
         FileRecord out = svc.overwriteContent(9L, 1L, "你好，新内容");
 
@@ -164,8 +180,13 @@ class FileServiceTest {
     @Test
     void createTextFileDelegatesToUpload() {
         nameFree();
+        quotaOk();
         when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
-        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
 
         FileRecord out = svc.createTextFile(1L, "hello.cc", null, "int main() { return 0; }");
 
@@ -173,6 +194,8 @@ class FileServiceTest {
         assertThat(out.getMimeType()).isEqualTo("text/plain");
         assertThat(out.getSize()).isEqualTo("int main() { return 0; }".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
         verify(storage).upload(anyString(), any(), anyLong(), anyString());
+        // D8：新建即通知建索引
+        verify(notifier).notifyReindex(anyLong(), anyLong());
     }
 
     @Test
@@ -345,9 +368,14 @@ class FileServiceTest {
     @Test
     void uploadAcceptsOwnFolder() {
         nameFree();
+        quotaOk();
         when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
         when(folderRepo.findById(5L)).thenReturn(Optional.of(folder(5L, 1L)));
-        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
 
         FileRecord out = svc.upload(1L, new byte[3], "a.txt", 5L, "text/plain");
 
@@ -358,8 +386,13 @@ class FileServiceTest {
     @Test
     void uploadNormalizesRootFolderToNull() {
         nameFree();
+        quotaOk();
         when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
-        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
 
         FileRecord zero = svc.upload(1L, new byte[3], "a.txt", 0L, "text/plain");
         FileRecord none = svc.upload(1L, new byte[3], "b.txt", null, "text/plain");
@@ -389,4 +422,104 @@ class FileServiceTest {
         verify(fileRepo).findByFolderIdAndOwnerIdOrderByCreatedAtDesc(5L, 1L);
         verify(fileRepo, never()).findByFolderIdOrderByCreatedAtDesc(anyLong());
     }
+
+    // ---------- 配额原子预占（D1） ----------
+
+    @Test
+    void uploadRejectsWhenAtomicReserveFails() {
+        // 乐观预检通过（容量充足），但并发下原子预占返回 0 → 拒绝并清理已写对象
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        when(userRepo.tryAddStorageUsed(anyLong(), anyLong())).thenReturn(0);
+        nameFree();
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
+
+        assertThatThrownBy(() -> svc.upload(1L, new byte[200], "a.txt", null, "text/plain"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("storage limit");
+        verify(storage).delete(anyString());
+        verify(userRepo).tryAddStorageUsed(1L, 200L);
+    }
+
+    // ---------- overwriteContent 扣旧大小（D2） ----------
+
+    @Test
+    void overwriteContentDeductsOldSize() {
+        // used=100 limit=110 oldSize=50：新内容 21B 时 100-50+21=71 <= 110 应放行（不扣旧大小则 121>110 拒绝）
+        FileRecord f = ownedFile(9L, 1L, 50);
+        when(fileRepo.findById(9L)).thenReturn(Optional.of(f));
+        User u = new User();
+        u.setId(1L);
+        u.setStorageUsed(100L);
+        u.setStorageLimit(110L);
+        when(userRepo.findById(1L)).thenReturn(Optional.of(u));
+        quotaOk();
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
+
+        FileRecord out = svc.overwriteContent(9L, 1L, "x".repeat(21));
+
+        assertThat(out.getSize()).isEqualTo(21L);
+        verify(userRepo).tryAddStorageUsed(1L, 21L - 50L);
+    }
+
+    // ---------- 并发重名换名重试（D4） ----------
+
+    @Test
+    void uploadRetriesOnceOnNameConflict() {
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        quotaOk();
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            if (saveCalls.incrementAndGet() == 1) {
+                throw new DataIntegrityViolationException("duplicate name");
+            }
+            return r;
+        });
+        // nameTaken：首轮 a.txt 未占用 → 重试轮 a.txt 已被并发者占用（→ a(1).txt），a(1).txt 未占用
+        when(fileRepo.nameTaken(anyLong(), any(), anyString(), anyLong())).thenAnswer(inv -> {
+            int n = ntCalls.incrementAndGet();
+            if (n == 2 && "a.txt".equals(inv.getArgument(2))) {
+                return true;
+            }
+            return false;
+        });
+
+        FileRecord out = svc.upload(1L, new byte[3], "a.txt", null, "text/plain");
+
+        assertThat(out.getName()).isEqualTo("a(1).txt");
+        verify(fileRepo, times(2)).save(any(FileRecord.class));
+        verify(userRepo, times(2)).tryAddStorageUsed(anyLong(), anyLong());
+        verify(notifier).notifyReindex(anyLong(), anyLong());
+    }
+
+    // ---------- 秒传通知建索引（D8） ----------
+
+    @Test
+    void checksumInstantNotifiesReindex() {
+        cacheEmpty();
+        when(fileRepo.findFirstByMd5AndOwnerId("abc", 1L)).thenReturn(Optional.of(ownedFile(9L, 1L, 10)));
+        when(userRepo.findById(1L)).thenReturn(Optional.of(userWithStorage(1_000_000L)));
+        quotaOk();
+        when(fileRepo.save(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(9L);
+            return r;
+        });
+
+        FileRecord out = svc.checksumInstant(1L, "abc", "b.txt", 10L, null);
+
+        assertThat(out).isNotNull();
+        verify(notifier).notifyReindex(9L, 1L);
+    }
+
+    private final AtomicInteger saveCalls = new AtomicInteger();
+    private final AtomicInteger ntCalls = new AtomicInteger();
 }

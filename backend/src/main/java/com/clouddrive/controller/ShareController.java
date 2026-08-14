@@ -3,7 +3,6 @@ package com.clouddrive.controller;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -76,7 +75,7 @@ public class ShareController {
     }
 
     @GetMapping("/s/{token}/download")
-    public ResponseEntity<InputStreamResource> download(@PathVariable String token) {
+    public ResponseEntity<org.springframework.core.io.Resource> download(@PathVariable String token) {
         Share share = shareService.getShare(token);
         FileService.DownloadResult r = fileService.downloadById(share.getFileId());
         String mime = r.file().getMimeType();
@@ -86,8 +85,11 @@ public class ShareController {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.parseMediaType(mime));
         headers.add("Content-Disposition", "attachment; filename=" + r.file().getName());
-        headers.setContentLength(r.file().getSize());
-        return new ResponseEntity<>(new InputStreamResource(r.stream()), headers, HttpStatus.OK);
+        // F4：已知长度资源 → 支持 Range（分享视频可 206 分片流式，/s 无需鉴权）
+        headers.add(HttpHeaders.ACCEPT_RANGES, "bytes");
+        return new ResponseEntity<>(
+                new com.clouddrive.common.KnownLengthInputStreamResource(r.stream(), r.file().getSize()),
+                headers, HttpStatus.OK);
     }
 
     private Long userId(HttpServletRequest request) {

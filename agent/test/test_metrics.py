@@ -1,5 +1,7 @@
 ﻿"""可观测性测试——指标采集与 Prometheus 文本格式渲染。"""
 
+import asyncio
+
 import pytest
 from app.agent.tools import safe_tool
 from app.core import metrics as m
@@ -44,7 +46,8 @@ def test_histogram_with_labels():
 
 
 @pytest.mark.asyncio
-async def test_safe_tool_records_metrics():
+async def test_safe_tool_swallows_error_no_metrics():
+    """safe_tool 只做错误转字符串，不再打点（去重后由 ToolManager 统一计数）。"""
     class T:
         @safe_tool
         async def ok(self):
@@ -55,12 +58,31 @@ async def test_safe_tool_records_metrics():
             raise ValueError("x")
 
     t = T()
-    await t.ok()
-    await t.boom()
+    assert await t.ok() == "fine"
+    assert "工具执行失败" in await t.boom()
     text = m.metrics.render()
-    assert 'tool_calls_total{name="ok", status="success"} 1' in text
-    assert 'tool_calls_total{name="boom", status="error"} 1' in text
-    assert "tool_latency_seconds" in text
+    assert "tool_calls_total{" not in text  # 无任何工具指标数据行
+
+
+def test_tool_metrics_counted_once(monkeypatch):
+    """A11 回归：safe_tool 包裹的 get_memory 经 ToolManager 执行只计数一次。"""
+    from app.agent.tool_manager import ToolManager
+
+    import app.service.memory_service as ms
+
+    async def fake_get_memory(uid):
+        return ["偏好英文"]
+
+    monkeypatch.setattr(ms, "get_memory", fake_get_memory)
+    tm = ToolManager()
+
+    async def main():
+        return await tm.execute("get_memory", {})
+
+    assert asyncio.run(main()) == "- 偏好英文"
+    text = m.metrics.render()
+    assert 'tool_calls_total{name="get_memory", status="success"} 1' in text
+    assert text.count('tool_calls_total{name="get_memory"') == 1
 
 
 def test_llm_cost_estimation():

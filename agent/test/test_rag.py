@@ -1,5 +1,7 @@
 """RAG 文本提取分派与语义族标注测试。"""
 
+import asyncio
+
 import pytest
 
 from app.core.rag import RAGEngine, _EXTRACTORS, detect_kind
@@ -99,3 +101,64 @@ def test_chunk_text_splits_long_sentence_without_empty_chunks():
     chunks = fixture.chunk_text("甲" * 55, chunk_size=20, overlap=5)
 
     assert chunks == ["甲" * 15, "甲" * 20, "甲" * 20, "甲" * 15]
+
+
+# ---------- A15：下载/元数据复用统一 HTTP 重试工具 ----------
+
+def test_download_and_file_meta_reuse_http_helper(monkeypatch):
+    class _Resp:
+        status_code = 200
+        content = b"hello"
+
+        def json(self):
+            return {"data": {"name": "a.txt", "size": 5}}
+
+    calls = []
+
+    async def fake_http_get(path, params, retries=2):
+        calls.append((path, params))
+        return _Resp()
+
+    monkeypatch.setattr("app.agent.tools._http_get", fake_http_get)
+
+    rag = RAGEngine()
+    assert asyncio.run(rag.download(7, 1)) == b"hello"
+    assert asyncio.run(rag.file_meta(7, 1)) == {"name": "a.txt", "size": 5}
+    assert calls[0] == ("/files/7/download", {"user_id": 1})
+    assert calls[1] == ("/files/7", {"user_id": 1})
+
+
+# ---------- A18：视觉 client 超时/重试 ----------
+
+def test_llm_vision_client_sets_timeout_and_retries(monkeypatch):
+    from app.core.llm_override import LLMOverride
+    from app.core.rag import _llm_vision_client
+
+    captured = {}
+
+    class _FakeOpenAI:
+        def __init__(self, base_url=None, api_key=None, timeout=None, max_retries=None):
+            captured["base_url"] = base_url
+            captured["api_key"] = api_key
+            captured["timeout"] = timeout
+            captured["max_retries"] = max_retries
+
+    monkeypatch.setattr("openai.OpenAI", _FakeOpenAI)
+    ov = LLMOverride(provider="openai", base_url="http://x", api_key="k", model="m")
+    client = _llm_vision_client(ov)
+    assert client is not None
+    assert captured["timeout"] == 30
+    assert captured["max_retries"] == 2
+
+
+def test_llm_vision_client_skips_non_openai_and_no_key():
+    from app.core.llm_override import LLMOverride
+    from app.core.rag import _llm_vision_client
+
+    assert _llm_vision_client(None) is None
+    assert _llm_vision_client(
+        LLMOverride(provider="anthropic", base_url="http://x", api_key="k", model="m")
+    ) is None
+    assert _llm_vision_client(
+        LLMOverride(provider="openai", base_url="http://x", api_key="", model="m")
+    ) is None

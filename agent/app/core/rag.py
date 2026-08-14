@@ -13,7 +13,6 @@ import threading
 from functools import partial
 from pathlib import Path
 
-import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import settings
@@ -23,7 +22,6 @@ from app.prompt.prompts import DOC_SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
 
-BACKEND_URL = settings.backend_url
 SUMMARY_RETRIES = 3
 
 
@@ -85,7 +83,8 @@ def _extract_markitdown(content: bytes, ext: str) -> str:
 
 def _llm_vision_client(ov: LLMOverride | None):
     """按请求级 LLM 覆盖构建 OpenAI 兼容视觉 client（MarkItDown 走 chat.completions）。
-    非 openai 系（anthropic）或未配置 key 时返回 None → 图片只落元数据（可空）。"""
+    非 openai 系（anthropic）或未配置 key 时返回 None → 图片只落元数据（可空）。
+    设 timeout + max_retries：LLM 挂死/瞬时失败时受限并重试，快速降级不阻塞索引（A18）。"""
     if ov is None or not ov.api_key:
         return None
     if (ov.provider or "openai") != "openai":
@@ -93,7 +92,7 @@ def _llm_vision_client(ov: LLMOverride | None):
     try:
         from openai import OpenAI
 
-        return OpenAI(base_url=ov.base_url or None, api_key=ov.api_key)
+        return OpenAI(base_url=ov.base_url or None, api_key=ov.api_key, timeout=30, max_retries=2)
     except Exception:
         logger.exception("failed to build OpenAI client for image caption")
         return None
@@ -174,29 +173,30 @@ class RAGEngine:
         )
 
     async def download(self, file_id: int, user_id: int) -> bytes | None:
-        from app.auth_token import get_internal_token
-        token = await get_internal_token()
-        async with httpx.AsyncClient(headers={"X-Agent-Token": token}, timeout=15.0, trust_env=False) as client:
-            resp = await client.get(f"{BACKEND_URL}/files/{file_id}/download", params={"user_id": user_id})
-            if resp.status_code == 401:
-                # 内部 token 可能已轮换：重置缓存取最新 token 重试一次
-                token = await get_internal_token(force_refresh=True)
-                async with httpx.AsyncClient(headers={"X-Agent-Token": token}, timeout=15.0, trust_env=False) as client2:
-                    resp = await client2.get(f"{BACKEND_URL}/files/{file_id}/download", params={"user_id": user_id})
-            return resp.content if resp.status_code == 200 else None
+        """下载文件内容。复用 tools._http_get 的统一 token/401 刷新/指数退避重试（A15）。"""
+        from app.agent.tools import _http_get
+
+        resp = await _http_get(f"/files/{file_id}/download", {"user_id": user_id})
+        return resp.content if resp is not None and resp.status_code == 200 else None
+
+    async def file_meta(self, file_id: int, user_id: int) -> dict | None:
+        """查询后端文件元数据 {name, size}（索引前预检大小用，避免全量下载）。
+        失败返回 None（调用方回退旧逻辑）；复用 _http_get 的重试与 401 刷新（A15）。"""
+        from app.agent.tools import _http_get
+
+        resp = await _http_get(f"/files/{file_id}", {"user_id": user_id})
+        if resp is not None and resp.status_code == 200:
+            try:
+                d = resp.json().get("data") or {}
+                return {"name": d.get("name", ""), "size": d.get("size") or 0}
+            except ValueError:
+                return None
+        return None
 
     async def _filename(self, file_id: int, user_id: int) -> str:
         """查询文件真实名称，决定文本解析类型（txt/pdf/docx）。失败返回空串（调用方兜底 txt）。"""
-        from app.auth_token import get_internal_token
-        token = await get_internal_token()
-        try:
-            async with httpx.AsyncClient(headers={"X-Agent-Token": token}, timeout=10.0, trust_env=False) as client:
-                resp = await client.get(f"{BACKEND_URL}/files/{file_id}", params={"user_id": user_id})
-                if resp.status_code == 200:
-                    return (resp.json().get("data") or {}).get("name", "")
-        except (httpx.HTTPError, ValueError):
-            pass
-        return ""
+        meta = await self.file_meta(file_id, user_id)
+        return (meta or {}).get("name", "")
 
     def extract_text(self, content: bytes, filename: str) -> str:
         """按扩展名从注册表分派提取；未注册/提取器为 None 返回空串（沿用原行为）。"""

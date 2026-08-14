@@ -15,7 +15,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 COLLECTION = "kb"
-EMBEDDING_SIZE = 384  # MiniLM 384 维
+EMBEDDING_SIZE = 384  # 默认 MiniLM 384 维；实际以配置模型维度为准（A17）
 DENSE_VECTOR = "dense"
 SPARSE_VECTOR = "sparse"
 UPSERT_BATCH = 128
@@ -26,6 +26,11 @@ class VectorStore:
     def __init__(self) -> None:
         self._client: AsyncQdrantClient | None = None
         self._collection_ready = False
+        self._embedding_size: int = EMBEDDING_SIZE
+
+    def set_embedding_size(self, size: int) -> None:
+        """配置实际 embedding 维度（embedding 模型加载后同步；新建 collection 用该值，A17）。"""
+        self._embedding_size = size
 
     @property
     def client(self) -> AsyncQdrantClient:
@@ -70,7 +75,7 @@ class VectorStore:
             COLLECTION,
             vectors_config={
                 DENSE_VECTOR: models.VectorParams(
-                    size=EMBEDDING_SIZE, distance=models.Distance.COSINE
+                    size=self._embedding_size, distance=models.Distance.COSINE
                 )
             },
             sparse_vectors_config={

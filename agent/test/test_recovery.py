@@ -77,8 +77,6 @@ async def test_http_get_success(monkeypatch):
 
     from app.agent import tools as tools_mod
 
-    original = httpx.AsyncClient
-
     class FakeResponse:
         status_code = 200
         headers: ClassVar = {"content-type": "text/plain"}
@@ -87,21 +85,12 @@ async def test_http_get_success(monkeypatch):
             return {"data": {"files": [1]}}
 
     class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, params=None):
+        async def get(self, url, params=None, headers=None, timeout=None):
             return FakeResponse()
 
-    tools_mod.httpx.AsyncClient = FakeClient
-    try:
-        result = await _http_get("/x", {})
-        assert result is not None and result.status_code == 200
-    finally:
-        tools_mod.httpx.AsyncClient = original
+    async def fake_client():
+        return FakeClient()
+
+    monkeypatch.setattr(tools_mod, "get_http_client", fake_client)
+    result = await _http_get("/x", {})
+    assert result is not None and result.status_code == 200

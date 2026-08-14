@@ -18,6 +18,9 @@ class Settings:
     # 需全局固定时设置 LLM_TEMPERATURE（如 0.1）。
     _llm_temperature = os.getenv("LLM_TEMPERATURE")
     llm_temperature: float | None = float(_llm_temperature) if _llm_temperature else None
+    # 输出长度上限（A19）：chat/summary 构造 LLM 时传 max_tokens，防输出不可控；
+    # rag 摘要逐调用传 max_tokens=500 覆盖此默认值。
+    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
     # 语义搜索重排（cross-encoder 精排）：粗排候选数 / 精排后阈值门控
@@ -42,8 +45,8 @@ class Settings:
     llm_price_input: float = float(os.getenv("LLM_PRICE_INPUT", "1.0"))
     llm_price_output: float = float(os.getenv("LLM_PRICE_OUTPUT", "2.0"))
 
-    # 长会话上下文：始终保留最近 N 轮完整消息（0 = 纯 token 预算模式），更早消息折叠进摘要。
-    # 目的：近期上下文完整 + 前缀稳定以命中 provider 上下文缓存，同时限制历史无限膨胀。
+    # 长会话上下文：预算内优先保留最近 N 轮完整消息（0 = 纯 token 预算模式；A20 起受预算约束，
+    # 不再无条件越预算），更早消息折叠进摘要。目的：近期上下文完整 + 前缀稳定以命中上下文缓存。
     context_keep_turns: int = int(os.getenv("CONTEXT_KEEP_TURNS", "10"))
 
     # 后端地址（本地开发 localhost；容器部署用 http://backend:8080）

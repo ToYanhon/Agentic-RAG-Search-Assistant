@@ -23,6 +23,15 @@ public interface UserRepository extends JpaRepository<User, Long> {
     @Query("update User u set u.storageUsed = u.storageUsed + :delta where u.id = :id")
     void addStorageUsed(@Param("id") Long id, @Param("delta") long delta);
 
+    /**
+     * 条件原子扣减（IMPROVEMENTS.md D1）：仅当累加后不超配额才更新，返回受影响行数（0 = 拒绝）。
+     * 并发写入在 MySQL 行锁下串行，消除「先读再判」的 check-then-act 竞态。
+     */
+    @Modifying
+    @Query("update User u set u.storageUsed = u.storageUsed + :delta "
+            + "where u.id = :id and u.storageUsed + :delta <= u.storageLimit")
+    int tryAddStorageUsed(@Param("id") Long id, @Param("delta") long delta);
+
     @Modifying
     @Query("update User u set u.username = :username where u.id = :id")
     void updateUsername(@Param("id") Long id, @Param("username") String username);

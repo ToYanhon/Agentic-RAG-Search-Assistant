@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from app.auth_token import get_internal_token
 from app.config import settings
 from app.core.embedding import searcher
+from app.core.http import get_http_client
 from app.core.llm_override import LLMOverride, reset_llm_override, set_llm_override
 from app.core.rag import RAGEngine, detect_kind
 from app.core.vector_store import vector_store
@@ -65,13 +66,23 @@ def _with_llm_override(request: Request, coro):
 
 
 async def _index_one(file_id: int, uid: int, name: str = "") -> dict:
-    """为单个文件建索引。返回 {status: ok|skipped|failed, chunks, reason}。"""
+    """为单个文件建索引。返回 {status: ok|skipped|failed, chunks, reason}。
+
+    先取后端元数据（name + size），size 超限直接跳过，避免全量下载（IMPROVEMENTS.md A12）；
+    元数据读取失败时回退「下载后判大小」的旧逻辑。
+    """
+    filename = name
+    meta = await rag.file_meta(file_id, uid)
+    if meta is not None:
+        filename = name or (meta.get("name") or "")
+        size = meta.get("size") or 0
+        if size > INDEX_MAX_BYTES:
+            return {"status": "skipped", "reason": "file too large"}
     content = await rag.download(file_id, uid)
     if content is None:
         return {"status": "failed", "reason": "file not found"}
     if len(content) > INDEX_MAX_BYTES:
         return {"status": "skipped", "reason": "file too large"}
-    filename = name or await rag._filename(file_id, uid)
     # 图片的 LLM 视觉描述会调用用户配置的模型：提取放线程池，避免阻塞事件循环
     text = await asyncio.to_thread(rag.extract_text, content, filename)
     if not text.strip():
@@ -82,19 +93,19 @@ async def _index_one(file_id: int, uid: int, name: str = "") -> dict:
 
 
 async def _folder_files(folder_id: int, uid: int) -> list[dict]:
-    """调 Go 文件夹树接口，递归收集该文件夹下所有文件 {id, name}。"""
+    """调后端文件夹树接口，递归收集该文件夹下所有文件 {id, name}。"""
+    client = await get_http_client()
     token = await get_internal_token()
     try:
-        async with httpx.AsyncClient(
-            headers={"X-Agent-Token": token}, timeout=15.0, trust_env=False
-        ) as client:
-            resp = await client.get(
-                f"{settings.backend_url}/folders/{folder_id}",
-                params={"user_id": uid},
-            )
-            if resp.status_code != 200:
-                return []
-            data = (resp.json().get("data") or {})
+        resp = await client.get(
+            f"{settings.backend_url}/folders/{folder_id}",
+            params={"user_id": uid},
+            headers={"X-Agent-Token": token},
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            return []
+        data = (resp.json().get("data") or {})
     except (httpx.HTTPError, ValueError):
         return []
 
@@ -111,15 +122,20 @@ async def _folder_files(folder_id: int, uid: int) -> list[dict]:
 
 
 async def _indexed_ids(uid: int, file_ids: list[int]) -> set[int]:
-    """批量判断哪些文件已建立索引（Qdrant count）。"""
-    indexed = set()
-    for fid in file_ids:
-        try:
-            if await vector_store.file_indexed(fid, uid):
-                indexed.add(fid)
-        except Exception:
-            pass
-    return indexed
+    """批量判断哪些文件已建立索引（Qdrant count，并发受限）。"""
+    if not file_ids:
+        return set()
+    sem = asyncio.Semaphore(FOLDER_INDEX_CONCURRENCY)
+
+    async def one(fid: int) -> tuple[int, bool]:
+        async with sem:
+            try:
+                return fid, await vector_store.file_indexed(fid, uid)
+            except Exception:
+                return fid, False
+
+    pairs = await asyncio.gather(*(one(fid) for fid in file_ids))
+    return {fid for fid, ok in pairs if ok}
 
 
 @router.post("/status")

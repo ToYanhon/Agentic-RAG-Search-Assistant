@@ -4,7 +4,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -120,7 +119,7 @@ public class FileController {
     }
 
     @GetMapping("/{id}/download")
-    public ResponseEntity<InputStreamResource> download(@PathVariable Long id, HttpServletRequest request) {
+    public ResponseEntity<org.springframework.core.io.Resource> download(@PathVariable Long id, HttpServletRequest request) {
         FileService.DownloadResult r = fileService.download(id, userId(request));
         String mime = r.file().getMimeType();
         if (mime == null || mime.isEmpty()) {
@@ -129,8 +128,11 @@ public class FileController {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.parseMediaType(mime));
         headers.add("Content-Disposition", "attachment; filename=" + r.file().getName());
-        headers.setContentLength(r.file().getSize());
-        return new ResponseEntity<>(new InputStreamResource(r.stream()), headers, HttpStatus.OK);
+        // F4：已知长度资源 → Spring ResourceHttpMessageConverter 支持 Range（视频 206 分片流式）
+        headers.add(HttpHeaders.ACCEPT_RANGES, "bytes");
+        return new ResponseEntity<>(
+                new com.clouddrive.common.KnownLengthInputStreamResource(r.stream(), r.file().getSize()),
+                headers, HttpStatus.OK);
     }
 
     @DeleteMapping("/{id}")

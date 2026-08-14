@@ -121,4 +121,16 @@ class AgentNotifierTest {
 
         n.drainQueue();
     }
+
+    @Test
+    void fallbackHttpClientUsesHttp11() throws Exception {
+        // D5：回退直发必须与 AgentClient 一致走 HTTP/1.1（HTTP/2 h2c upgrade 会被 uvicorn 拒收）
+        ListOperations<String, String> ops = mock(ListOperations.class);
+        AgentNotifier n = new AgentNotifier(props(), token(), redis(ops));
+
+        java.lang.reflect.Field f = AgentNotifier.class.getDeclaredField("http");
+        f.setAccessible(true);
+        java.net.http.HttpClient client = (java.net.http.HttpClient) f.get(n);
+        assertThat(client.version()).isEqualTo(java.net.http.HttpClient.Version.HTTP_1_1);
+    }
 }

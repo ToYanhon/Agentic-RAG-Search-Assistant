@@ -43,6 +43,12 @@ async def _stop_skills():
         except asyncio.CancelledError:
             pass
         _skills_watch_task = None
+    from app.core.http import close_http_client
+    from app.core.vector_store import vector_store
+
+    await close_http_client()
+    # A16：关闭 Qdrant 客户端（close() 此前从未被调用）
+    await vector_store.close()
 
 
 @app.middleware("http")

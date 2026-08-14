@@ -9,13 +9,18 @@ import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.clouddrive.common.AppException;
 import com.clouddrive.entity.FileRecord;
@@ -28,7 +33,8 @@ import com.clouddrive.storage.MinioStorage;
 
 /**
  * 文件业务（对齐 Go fileService）：直传/秒传/下载/删除(含级联)/重命名/移动/搜索/列表。
- * 关键不变量：秒传 owner 限定 + CopyObject 独立对象；删除/级联删除必发 agent unindex。
+ * 关键不变量：秒传 owner 限定 + CopyObject 独立对象；删除/级联删除必发 agent unindex；
+ * 新建（上传/秒传/覆盖写）必发 notifyReindex（D8）；配额以原子条件更新为准（D1）。
  */
 @Service
 public class FileService {
@@ -42,21 +48,23 @@ public class FileService {
     private final MinioStorage storage;
     private final CacheService cache;
     private final AgentNotifier notifier;
+    private final TransactionTemplate tx;
 
     public FileService(FileRepository fileRepo, FolderRepository folderRepo,
             UserRepository userRepo, MinioStorage storage,
-            CacheService cache, AgentNotifier notifier) {
+            CacheService cache, AgentNotifier notifier,
+            PlatformTransactionManager txManager) {
         this.fileRepo = fileRepo;
         this.folderRepo = folderRepo;
         this.userRepo = userRepo;
         this.storage = storage;
         this.cache = cache;
         this.notifier = notifier;
+        this.tx = new TransactionTemplate(txManager);
     }
 
     // ---------- 上传 ----------
 
-    @Transactional
     public FileRecord upload(Long ownerId, byte[] data, String originalName, Long folderId, String contentType) {
         User user = userRepo.findById(ownerId)
                 .orElseThrow(() -> AppException.internal("owner not found"));
@@ -64,38 +72,31 @@ public class FileService {
             throw AppException.storageExceeded("storage limit exceeded");
         }
         Long folder = validateFolder(ownerId, folderId);
-        String name = uniqueName(ownerId, folder, originalName, 0L);
         String md5 = md5Hex(data);
-        String objectKey = objectKey(ownerId, name);
+        // objectKey 与文件名解耦（D4）：重名冲突换名重试时无需重传对象
+        String objectKey = objectKey(ownerId);
         try {
             storage.upload(objectKey, new ByteArrayInputStream(data), data.length, contentType);
         } catch (Exception e) {
             throw AppException.internal("storage upload failed");
         }
-        FileRecord f = new FileRecord();
-        f.setName(name);
-        f.setSize((long) data.length);
-        f.setMimeType(contentType);
-        f.setMd5(md5);
-        f.setObjectKey(objectKey);
-        f.setFolderId(folder);
-        f.setOwnerId(ownerId);
+        FileRecord saved;
         try {
-            fileRepo.save(f);
-        } catch (Exception e) {
+            saved = withUniqueRetry(() -> saveNewFile(ownerId, folder, originalName, data.length, contentType, md5, objectKey));
+        } catch (RuntimeException e) {
             try {
                 storage.delete(objectKey);
             } catch (Exception ignored) {
             }
-            throw AppException.internal("create file record failed");
+            throw e;
         }
-        userRepo.addStorageUsed(ownerId, data.length);
         cache.del(profileKey(ownerId), checksumKey(ownerId, md5));
-        return f;
+        // 新建即通知 agent 建索引（尽力而为；D8）
+        notifier.notifyReindex(saved.getId(), saved.getOwnerId());
+        return saved;
     }
 
     /** 按内容创建文本文件（agent 工具用，对齐 upload 语义但直接接受字符串内容）。 */
-    @Transactional
     public FileRecord createTextFile(Long ownerId, String name, Long folderId, String content) {
         if (name == null || name.isBlank()) {
             throw AppException.badRequest("name required");
@@ -105,7 +106,6 @@ public class FileService {
     }
 
     /** 秒传预检：MD5+大小查重，命中且源属于请求者本人时 CopyObject 到新 key 建记录。 */
-    @Transactional
     public FileRecord checksumInstant(Long ownerId, String md5, String name, long size, Long folderId) {
         String key = checksumKey(ownerId, md5);
         var cached = cache.get(key, ChecksumVal.class);
@@ -127,33 +127,25 @@ public class FileService {
             throw AppException.storageExceeded("storage limit exceeded");
         }
         Long folder = validateFolder(ownerId, folderId);
-        String unique = uniqueName(ownerId, folder, name, 0L);
-        String objectKey = objectKey(ownerId, unique);
+        String objectKey = objectKey(ownerId);
         try {
             storage.copyObject(src.getObjectKey(), objectKey);
         } catch (Exception e) {
             throw AppException.internal("copy object failed");
         }
-        FileRecord f = new FileRecord();
-        f.setName(unique);
-        f.setSize(size);
-        f.setMimeType(src.getMimeType());
-        f.setMd5(src.getMd5());
-        f.setObjectKey(objectKey);
-        f.setFolderId(folder);
-        f.setOwnerId(ownerId);
+        FileRecord saved;
         try {
-            fileRepo.save(f);
-        } catch (Exception e) {
+            saved = withUniqueRetry(() -> saveInstantFile(ownerId, folder, name, size, src, objectKey));
+        } catch (RuntimeException e) {
             try {
                 storage.delete(objectKey);
             } catch (Exception ignored) {
             }
-            throw AppException.internal("create file record failed");
+            throw e;
         }
-        userRepo.addStorageUsed(ownerId, size);
         cache.del(profileKey(ownerId));
-        return f;
+        notifier.notifyReindex(saved.getId(), saved.getOwnerId());
+        return saved;
     }
 
     // ---------- 下载 ----------
@@ -227,7 +219,8 @@ public class FileService {
         } catch (Exception e) {
             throw AppException.internal("storage delete objects failed");
         }
-        fileRepo.deleteAllById(ids);
+        // 批量删除：单条 JPQL where id in（deleteAllById 会逐条 SELECT+DELETE，N+1）
+        fileRepo.deleteAllByIdInBatch(ids);
         sizes.forEach(userRepo::addStorageUsed);
         List<String> delKeys = new ArrayList<>();
         for (FileRecord f : files) {
@@ -240,38 +233,42 @@ public class FileService {
 
     // ---------- 重命名 / 移动 ----------
 
-    @Transactional
     public void rename(Long fileId, Long userId, String name) {
-        FileRecord f = fileRepo.findById(fileId)
-                .orElseThrow(() -> AppException.notFound("resource not found"));
-        if (!f.getOwnerId().equals(userId)) {
-            throw AppException.forbidden("access denied");
-        }
-        String unique = uniqueName(userId, f.getFolderId(), name, fileId);
-        fileRepo.updateName(fileId, unique);
-    }
-
-    @Transactional
-    public void move(Long fileId, Long userId, long targetFolderId) {
-        FileRecord f = fileRepo.findById(fileId)
-                .orElseThrow(() -> AppException.notFound("resource not found"));
-        if (!f.getOwnerId().equals(userId)) {
-            throw AppException.forbidden("access denied");
-        }
-        Long target = null;
-        if (targetFolderId != 0) {
-            Folder folder = folderRepo.findById(targetFolderId)
-                    .orElseThrow(() -> AppException.badRequest("target folder not found"));
-            if (!folder.getOwnerId().equals(userId)) {
+        withUniqueRetry(() -> {
+            FileRecord f = fileRepo.findById(fileId)
+                    .orElseThrow(() -> AppException.notFound("resource not found"));
+            if (!f.getOwnerId().equals(userId)) {
                 throw AppException.forbidden("access denied");
             }
-            target = targetFolderId;
-        }
-        String unique = uniqueName(userId, target, f.getName(), fileId);
-        if (!unique.equals(f.getName())) {
+            String unique = uniqueName(userId, f.getFolderId(), name, fileId);
             fileRepo.updateName(fileId, unique);
-        }
-        fileRepo.updateFolderId(fileId, target);
+            return null;
+        });
+    }
+
+    public void move(Long fileId, Long userId, long targetFolderId) {
+        withUniqueRetry(() -> {
+            FileRecord f = fileRepo.findById(fileId)
+                    .orElseThrow(() -> AppException.notFound("resource not found"));
+            if (!f.getOwnerId().equals(userId)) {
+                throw AppException.forbidden("access denied");
+            }
+            Long target = null;
+            if (targetFolderId != 0) {
+                Folder folder = folderRepo.findById(targetFolderId)
+                        .orElseThrow(() -> AppException.badRequest("target folder not found"));
+                if (!folder.getOwnerId().equals(userId)) {
+                    throw AppException.forbidden("access denied");
+                }
+                target = targetFolderId;
+            }
+            String unique = uniqueName(userId, target, f.getName(), fileId);
+            if (!unique.equals(f.getName())) {
+                fileRepo.updateName(fileId, unique);
+            }
+            fileRepo.updateFolderId(fileId, target);
+            return null;
+        });
     }
 
     // ---------- 写内容（agent 工具用） ----------
@@ -286,18 +283,27 @@ public class FileService {
         }
         byte[] data = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         User user = userRepo.findById(userId).orElseThrow(() -> AppException.internal("owner not found"));
-        if (user.getStorageUsed() + data.length > user.getStorageLimit()) {
+        long oldSize = f.getSize();
+        // D2：预检扣除旧文件大小（旧内容会释放配额）
+        if (user.getStorageUsed() - oldSize + data.length > user.getStorageLimit()) {
             throw AppException.storageExceeded("storage limit exceeded");
         }
-        String objectKey = objectKey(userId, f.getName());
+        String objectKey = objectKey(userId);
         String mime = "text/plain; charset=utf-8";
         try {
             storage.upload(objectKey, new ByteArrayInputStream(data), data.length, mime);
         } catch (Exception e) {
             throw AppException.internal("storage upload failed");
         }
+        // D1：原子应用配额增量（正增量即预占；0 说明并发导致超限，整体回滚）
+        if (userRepo.tryAddStorageUsed(userId, data.length - oldSize) == 0) {
+            try {
+                storage.delete(objectKey);
+            } catch (Exception ignored) {
+            }
+            throw AppException.storageExceeded("storage limit exceeded");
+        }
         String oldKey = f.getObjectKey();
-        long oldSize = f.getSize();
         f.setSize((long) data.length);
         f.setMimeType(mime);
         f.setMd5(md5Hex(data));
@@ -315,7 +321,6 @@ public class FileService {
             storage.delete(oldKey);
         } catch (Exception ignored) {
         }
-        userRepo.addStorageUsed(userId, data.length - oldSize);
         cache.del(profileKey(userId), checksumKey(userId, f.getMd5()));
         // 内容已变更：异步通知 Agent 重建索引（尽力而为，防止检索命中过期内容）
         notifier.notifyReindex(f.getId(), f.getOwnerId());
@@ -409,6 +414,59 @@ public class FileService {
 
     // ---------- 工具 ----------
 
+    /**
+     * 在独立事务中执行 work；命中唯一索引冲突（并发重名，D4）时换名重试一次。
+     * 每次尝试在全新事务中运行（避免「事务已 rollback-only」陷阱），配额预占随尝试一并回滚。
+     */
+    private <T> T withUniqueRetry(Supplier<T> work) {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return tx.execute(status -> work.get());
+            } catch (DataIntegrityViolationException e) {
+                if (attempt == 0) {
+                    continue; // 并发重名：换名重试一次（唯一索引保证重试不会无限冲突）
+                }
+                throw e;
+            }
+        }
+    }
+
+    /** 上传落库（在 withUniqueRetry 的独立事务内执行）：原子预占配额 + 建记录。 */
+    private FileRecord saveNewFile(Long ownerId, Long folder, String baseName, long size,
+                                   String contentType, String md5, String objectKey) {
+        String name = uniqueName(ownerId, folder, baseName, 0L);
+        FileRecord f = new FileRecord();
+        f.setName(name);
+        f.setSize(size);
+        f.setMimeType(contentType);
+        f.setMd5(md5);
+        f.setObjectKey(objectKey);
+        f.setFolderId(folder);
+        f.setOwnerId(ownerId);
+        if (userRepo.tryAddStorageUsed(ownerId, size) == 0) {
+            throw AppException.storageExceeded("storage limit exceeded");
+        }
+        return fileRepo.save(f);
+    }
+
+    /** 秒传落库（在 withUniqueRetry 的独立事务内执行）：原子预占配额 + CopyObject 记录。 */
+    private FileRecord saveInstantFile(Long ownerId, Long folder, String baseName, long size,
+                                       FileRecord src, String objectKey) {
+        String unique = uniqueName(ownerId, folder, baseName, 0L);
+        FileRecord f = new FileRecord();
+        f.setName(unique);
+        f.setSize(size);
+        f.setMimeType(src.getMimeType());
+        f.setMd5(src.getMd5());
+        f.setObjectKey(objectKey);
+        f.setFolderId(folder);
+        f.setOwnerId(ownerId);
+        if (userRepo.tryAddStorageUsed(ownerId, size) == 0) {
+            throw AppException.storageExceeded("storage limit exceeded");
+        }
+        return fileRepo.save(f);
+    }
+
     /** 校验目标文件夹存在且属于当前用户（与 move 一致）：null/0 归一为根目录(null)。 */
     public Long validateFolder(Long ownerId, Long folderId) {
         if (folderId == null || folderId == 0) {
@@ -448,8 +506,11 @@ public class FileService {
         }
     }
 
-    private String objectKey(Long ownerId, String name) {
-        return "users/" + ownerId + "/" + System.nanoTime() + "-" + name;
+    /**
+     * 对象 key 与文件名解耦（D4）：换名重试无需重传/重建对象；纯内部格式，秒传 CopyObject 与删除仅当不透明串。
+     */
+    public static String objectKey(Long ownerId) {
+        return "users/" + ownerId + "/" + System.nanoTime() + "-" + UUID.randomUUID();
     }
 
     private static String md5Hex(byte[] data) {

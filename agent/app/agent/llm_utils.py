@@ -145,38 +145,48 @@ async def llm_stream(llm, messages) -> AsyncIterator[tuple[str, AIMessage]]:
     """流式调用 LLM：逐个产出 (文本块, None)；完成后产出 ("", 最终 AIMessage)。
 
     最终消息带 tool_calls / usage_metadata（流式聚合），可直接追加进会话消息。
+    记录 llm_calls / llm_latency（流式主路径打点，IMPROVEMENTS.md A11）。
     """
     from langchain_core.messages import AIMessageChunk
 
+    labels = {"model": current_model()}
+    start = now()
     chunks: list[AIMessageChunk] = []
     content = ""
-    async for chunk in llm.astream(messages):
-        c = getattr(chunk, "content", "") or ""
-        if isinstance(c, str):
-            content += c
-            if c:
-                yield c, None
-        chunks.append(chunk)
+    try:
+        async for chunk in llm.astream(messages):
+            c = getattr(chunk, "content", "") or ""
+            if isinstance(c, str):
+                content += c
+                if c:
+                    yield c, None
+            chunks.append(chunk)
 
-    merged: AIMessage | AIMessageChunk | None = None
-    for c in chunks:
-        merged = c if merged is None else merged + c
-    if merged is None:
-        merged = AIMessage(content=content)
+        merged: AIMessage | AIMessageChunk | None = None
+        for c in chunks:
+            merged = c if merged is None else merged + c
+        if merged is None:
+            merged = AIMessage(content=content)
 
-    um = getattr(merged, "usage_metadata", None) or {}
-    if not um and chunks:  # 聚合可能丢 usage，回退取最后一个 chunk
-        um = getattr(chunks[-1], "usage_metadata", None) or {}
-    if getattr(merged, "id", None) is None:
-        import uuid
+        um = getattr(merged, "usage_metadata", None) or {}
+        if not um and chunks:  # 聚合可能丢 usage，回退取最后一个 chunk
+            um = getattr(chunks[-1], "usage_metadata", None) or {}
+        if getattr(merged, "id", None) is None:
+            import uuid
 
-        merged.id = uuid.uuid4().hex
+            merged.id = uuid.uuid4().hex
 
-    if isinstance(merged, AIMessageChunk):
-        merged = AIMessage(
-            content=content,
-            tool_calls=[dict(tc) for tc in (getattr(merged, "tool_calls", None) or [])],
-            usage_metadata=um or None,
-            id=merged.id,
-        )
-    yield "", merged
+        if isinstance(merged, AIMessageChunk):
+            merged = AIMessage(
+                content=content,
+                tool_calls=[dict(tc) for tc in (getattr(merged, "tool_calls", None) or [])],
+                usage_metadata=um or None,
+                id=merged.id,
+            )
+        llm_calls.inc(1, {**labels, "status": "success"})
+        yield "", merged
+    except Exception:
+        llm_calls.inc(1, {**labels, "status": "error"})
+        raise
+    finally:
+        llm_latency.observe(now() - start, labels)

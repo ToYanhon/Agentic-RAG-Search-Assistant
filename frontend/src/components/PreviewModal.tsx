@@ -1,8 +1,8 @@
 /** 文件预览模态框：图片 / PDF / 文本 / 视频 / 不支持提示。 */
 import { useEffect, useRef, useState } from 'react'
-import { getFileBlob, getFileContent } from '../api/files'
+import { getFileBlob, getFileContent, getDownloadUrl } from '../api/files'
 import { formatBytes } from '../utils/format'
-import { previewKind, isMarkdown, TEXT_PREVIEW_MAX } from '../utils/preview'
+import { previewKind, isMarkdown, TEXT_PREVIEW_MAX, NON_TEXT_PREVIEW_MAX } from '../utils/preview'
 import type { FileItem } from '../types'
 import { IconDownload, IconFile, IconX } from './Icons'
 import Markdown from './Markdown'
@@ -37,9 +37,24 @@ export default function PreviewModal({ file, onClose, onDownload }: PreviewModal
     if (urlRef.current) { URL.revokeObjectURL(urlRef.current); urlRef.current = null }
     setUrl(null)
     setText(null)
-    setStatus(kind === null ? 'unsupported' : kind === 'text' && file.size > TEXT_PREVIEW_MAX ? 'too-large' : 'loading')
+    setStatus(
+      kind === null ? 'unsupported'
+      : kind === 'text' && file.size > TEXT_PREVIEW_MAX ? 'too-large'
+      : (kind === 'image' || kind === 'pdf') && file.size > NON_TEXT_PREVIEW_MAX ? 'too-large'
+      : 'loading',
+    )
     if (kind === null) return
     if (kind === 'text' && file.size > TEXT_PREVIEW_MAX) return
+    if ((kind === 'image' || kind === 'pdf') && file.size > NON_TEXT_PREVIEW_MAX) return
+
+    if (kind === 'video') {
+      // F4：视频走 Range 流式直连（浏览器自动发 Range 拿 206 分片，可拖动、不整文件进内存）。
+      // 下载端点需 Authorization 头而 <video> 元素无法携带，故仅对下载路由以 ?token= 查询参数回退鉴权。
+      const token = localStorage.getItem('token') ?? ''
+      const u = token ? `${getDownloadUrl(file.id)}?token=${encodeURIComponent(token)}` : ''
+      if (u) { setUrl(u); setStatus('ready') } else { setStatus('error') }
+      return
+    }
 
     ;(async () => {
       try {
@@ -117,7 +132,7 @@ export default function PreviewModal({ file, onClose, onDownload }: PreviewModal
           {status === 'too-large' && (
             <div className="h-72 flex flex-col items-center justify-center gap-2 text-ink-mute">
               <IconFile size={30} />
-              <p className="text-sm">文本文件过大，建议下载后查看</p>
+              <p className="text-sm">文件过大，建议下载后查看</p>
             </div>
           )}
           {status === 'ready' && kind === 'image' && url && (

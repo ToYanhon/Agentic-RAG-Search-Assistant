@@ -61,7 +61,15 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
   const [width, setWidth] = useState(DEFAULT_WIDTH)
   const [dragging, setDragging] = useState(false)
   const [aiBadge, setAiBadge] = useState('')
-  const bottomRef = useRef<HTMLDivElement>(null)
+  // F1：流式回复独立 state——chunk 只追加 streaming，不每 chunk 复制整个消息列表（消除 O(n²)）
+  const [streaming, setStreaming] = useState('')
+  const streamingRef = useRef('')
+  const streamingMetaRef = useRef<ChatMessage['usage'] | null>(null)
+  const [streamingActive, setStreamingActive] = useState(false)
+  // F2：SSE 中止 + 会话守卫
+  const abortRef = useRef<AbortController | null>(null)
+  const activeIdRef = useRef<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
   const list = visible(messages)
 
   /** 加载当前应用的供应商徽标（后端存储配置 + 本地 active 选择）。 */
@@ -105,11 +113,17 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
     }
   }, [])
 
-  /** 打开抽屉时加载会话列表与 AI 状态；关闭时复位。 */
+  /** 中止进行中的流式请求（切换/关闭/新建会话时调用）。 */
+  const abortStream = useCallback(() => { abortRef.current?.abort() }, [])
+
+  /** 打开抽屉时加载会话列表与 AI 状态；关闭时复位并中止在途流。 */
   useEffect(() => {
     if (open) { loadSessions(); loadAiBadge() }
-    else { setShowList(false); setShowMemory(false); setActiveId(null); setMessages([]) }
-  }, [open, loadSessions, loadAiBadge])
+    else {
+      abortStream()
+      setShowList(false); setShowMemory(false); setActiveId(null); setMessages([])
+    }
+  }, [open, loadSessions, loadAiBadge, abortStream])
 
   /** 加载长期记忆列表。 */
   const loadMemories = useCallback(async () => {
@@ -126,13 +140,24 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
     if (open && showMemory) loadMemories()
   }, [open, showMemory, loadMemories])
 
-  const scrollBottom = useCallback(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [])
-  useEffect(() => { scrollBottom() }, [messages, busy])
+  /** 同步当前会话 id（流式守卫用）。 */
+  useEffect(() => { activeIdRef.current = activeId }, [activeId])
+
+  /** F1：近底才吸附滚动（瞬时，尊重用户上滚）。 */
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [messages, streaming, busy])
+
+  // 卸载时中止在途流
+  useEffect(() => () => abortStream(), [abortStream])
 
   /** 新建会话：回到空对话草稿。 */
   const handleNew = () => {
+    abortStream()
     setActiveId(null)
     setMessages([])
     setShowList(false)
@@ -140,6 +165,7 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
 
   /** 打开某个历史会话：显式加载消息（不依赖 activeId effect，避免发送时被覆盖）。 */
   const openSession = (id: string) => {
+    abortStream()
     setActiveId(id)
     setShowList(false)
     getMessages(id).then((res) => {
@@ -190,62 +216,67 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
       ])
       return
     }
-    setMessages((m) => [...m, { role: 'user', content: useText }, { role: 'ai', content: '' }])
+    setMessages((m) => [...m, { role: 'user', content: useText }])
     setBusy(true)
+    // F1：流式文本走独立 state（chunk 单串追加，不复制整个消息列表）
+    streamingRef.current = ''
+    setStreaming('')
+    streamingMetaRef.current = null
+    setStreamingActive(true)
+    // F2：中止上一次在途流，建立本次 AbortController
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
     let isNew = false
+    let sid: string | null = null
     try {
-      let sid = activeId
+      sid = activeId
       if (!sid) {
         const res = await createSession('新对话')
         if (!res.data) throw new Error('会话创建失败')
         sid = res.data.id
         isNew = true
+        activeIdRef.current = sid
         setActiveId(sid)
         await loadSessions()
+      } else {
+        activeIdRef.current = sid
       }
-      for await (const ev of sendMessageStream(sid, useText)) {
+      for await (const ev of sendMessageStream(sid, useText, ac.signal)) {
+        // F2：切换会话/关闭抽屉后立即中止，不再污染当前视图
+        if (activeIdRef.current !== sid) { ac.abort(); break }
         if (ev.type === 'text' && ev.content) {
-          const chunk = ev.content
-          setMessages((m) => {
-            const n = [...m]
-            n[n.length - 1] = { role: 'ai', content: (n[n.length - 1].content || '') + chunk }
-            return n
-          })
-        } else if (ev.type === 'tool_start' && ev.name) {
-          /* 可选：工具调用提示 */
+          streamingRef.current += ev.content
+          setStreaming(streamingRef.current)
         } else if (ev.type === 'meta') {
           const meta = ev
-          setMessages((m) => {
-            const n = [...m]
-            if (n.length === 0) return n
-            n[n.length - 1] = {
-              ...n[n.length - 1],
-              usage: {
-                input_tokens: meta.input_tokens ?? 0,
-                output_tokens: meta.output_tokens ?? 0,
-                total_tokens: meta.total_tokens ?? 0,
-                model: meta.model,
-                provider: meta.provider,
-                context_window: meta.context_window,
-                cost_yuan: meta.cost_yuan,
-                latency_ms: meta.latency_ms,
-                truncated: meta.truncated,
-                summary_used: meta.summary_used,
-                dropped_messages: meta.dropped_messages,
-                summary_text: meta.summary_text,
-                prompt_cache_hit_tokens: meta.prompt_cache_hit_tokens ?? 0,
-                prompt_cache_miss_tokens: meta.prompt_cache_miss_tokens ?? 0,
-              },
-            }
-            return n
-          })
+          streamingMetaRef.current = {
+            input_tokens: meta.input_tokens ?? 0,
+            output_tokens: meta.output_tokens ?? 0,
+            total_tokens: meta.total_tokens ?? 0,
+            model: meta.model,
+            provider: meta.provider,
+            context_window: meta.context_window,
+            cost_yuan: meta.cost_yuan,
+            latency_ms: meta.latency_ms,
+            truncated: meta.truncated,
+            summary_used: meta.summary_used,
+            dropped_messages: meta.dropped_messages,
+            summary_text: meta.summary_text,
+            prompt_cache_hit_tokens: meta.prompt_cache_hit_tokens ?? 0,
+            prompt_cache_miss_tokens: meta.prompt_cache_miss_tokens ?? 0,
+          }
         } else if (ev.type === 'error') {
-          setMessages((m) => {
-            const n = [...m]
-            n[n.length - 1] = { role: 'ai', content: ev.content ? `（${ev.content}）` : '（处理失败，请重试）' }
-            return n
-          })
+          streamingRef.current = ev.content ? `（${ev.content}）` : '（处理失败，请重试）'
+          setStreaming(streamingRef.current)
         }
+      }
+      // 流结束：一次性把流式回复并入消息列表（带 usage），中止/切换则丢弃
+      if (!ac.signal.aborted && activeIdRef.current === sid) {
+        setMessages((m) => [
+          ...m,
+          { role: 'ai', content: streamingRef.current, usage: streamingMetaRef.current ?? undefined },
+        ])
       }
       /** 首次对话自动以第一句话命名会话。 */
       if (isNew) {
@@ -253,12 +284,16 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
       }
       await loadSessions()
     } catch {
-      setMessages((m) => {
-        const n = [...m]
-        n[n.length - 1] = { role: 'ai', content: '（发送失败，请重试）' }
-        return n
-      })
+      // 中止（切换/关闭）不写错误文案
+      if (!ac.signal.aborted && activeIdRef.current === sid) {
+        setMessages((m) => [...m, { role: 'ai', content: '（发送失败，请重试）' }])
+      }
     } finally {
+      streamingRef.current = ''
+      setStreaming('')
+      streamingMetaRef.current = null
+      setStreamingActive(false)
+      if (abortRef.current === ac) abortRef.current = null
       setBusy(false)
     }
   }
@@ -528,7 +563,7 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
           )}
 
           {/* 消息区 */}
-          <div className="flex-1 min-h-0 overflow-y-auto px-4 pb-4">
+          <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 pb-4">
             {messages.length === 0 ? (
               <div className="h-full flex items-center justify-center text-center px-6">
                 <div>
@@ -605,7 +640,23 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
                 ))}
               </div>
             )}
-            <div ref={bottomRef} />
+            {/* F1：流式气泡——chunk 只更新此块，不重渲染整个消息列表 */}
+            {streamingActive && (
+              <div className="flex justify-start">
+                <div className="max-w-[88%] px-3.5 py-2.5 rounded-2xl text-sm bg-canvas border border-line rounded-bl-sm text-ink">
+                  {streaming ? (
+                    <Markdown>{streaming}</Markdown>
+                  ) : (
+                    <span className="inline-flex gap-1 py-1">
+                      {[0, 1, 2].map((d) => (
+                        <span key={d} className="w-1.5 h-1.5 bg-ink-mute rounded-full"
+                          style={{ animation: `pulseDot 1.2s ease-in-out ${d * 0.18}s infinite` }} />
+                      ))}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 输入区 */}

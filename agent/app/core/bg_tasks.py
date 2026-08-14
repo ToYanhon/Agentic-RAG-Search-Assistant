@@ -6,6 +6,10 @@
 
 重试策略对齐 llm_utils：指数退避、上限固定；成功路径零开销。
 调用方传 coro_factory（async 可调用）而非协程，便于每次重试重建协程。
+
+run_bg 创建的任务由模块级 _BG_TASKS 持强引用：事件循环对任务只持弱引用，
+无强引用的 fire-and-forget 任务可能在执行中被 GC 静默取消（IMPROVEMENTS.md A5）；
+任务完成后经 done 回调自动移除，集合不泄漏。
 """
 
 import asyncio
@@ -17,6 +21,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_RETRIES = 2
 DEFAULT_BACKOFF_SEC = 2.0
 MAX_BACKOFF_SEC = 8.0
+
+# 正在运行的后台任务强引用集合（防 GC 静默取消；done 时由回调移除）
+_BG_TASKS: set[asyncio.Task] = set()
 
 
 async def _run_with_retry(
@@ -57,11 +64,14 @@ def run_bg(
 
     调用方不 await（区别于 await_with_retry）；返回 task 便于需要时持有/取消。
     必须在运行中的事件循环里调用（通常由 async 上下文发起）。
+    任务由 _BG_TASKS 持强引用，完成后自动移除（A5）。
     """
     task = asyncio.create_task(
         _run_with_retry(coro_factory, retries, backoff_sec, name),
         name=name,
     )
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
     return task
 
 

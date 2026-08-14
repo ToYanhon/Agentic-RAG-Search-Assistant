@@ -22,7 +22,10 @@ from app.core.vector_store import vector_store
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+
+def _build_sparse(chunks: list[str]):
+    """线程内批量构建稀疏向量（jieba 分词阻塞，移出事件循环，A9）。"""
+    return [build_sparse_vector(c) for c in chunks]
 
 
 class SemanticSearch:
@@ -34,7 +37,12 @@ class SemanticSearch:
         if self._model is None:
             async with self._model_lock:
                 if self._model is None:
-                    self._model = SentenceTransformer(MODEL_NAME)
+                    # A17：用配置的 embedding_model（ENV EMBEDDING_MODEL），消除硬编码漂移；
+                    # 并把实际维度同步给 vector_store（新建 collection 用正确 size）。
+                    self._model = SentenceTransformer(settings.embedding_model)
+                    vector_store.set_embedding_size(
+                        self._model.get_sentence_embedding_dimension()
+                    )
         return self._model
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
@@ -55,8 +63,10 @@ class SemanticSearch:
     async def index_file(
         self, file_id: int, user_id: int, chunks: list[str], chunk_type: str = "text"
     ):
-        embeddings = await self._embed(chunks)
-        sparse_vectors = [build_sparse_vector(chunk) for chunk in chunks]
+        embeddings, sparse_vectors = await asyncio.gather(
+            self._embed(chunks),
+            asyncio.to_thread(_build_sparse, chunks),
+        )
         await vector_store.upsert_chunks(
             file_id,
             user_id,
@@ -78,7 +88,10 @@ class SemanticSearch:
         limit: int | None = None,
     ) -> list[dict]:
         """返回重排前候选，供线上检索和离线评估复用。"""
-        emb = await self._embed([query])
+        emb, sparse_vec = await asyncio.gather(
+            self._embed([query]),
+            asyncio.to_thread(build_sparse_vector, query),
+        )
         candidates = max(settings.rerank_candidates, top_k)
         if hybrid is None:
             hybrid = settings.hybrid_search
@@ -86,7 +99,7 @@ class SemanticSearch:
             dense, sparse = await asyncio.gather(
                 vector_store.search(emb[0], user_id, candidates),
                 vector_store.search_sparse(
-                    build_sparse_vector(query),
+                    sparse_vec,
                     user_id,
                     max(settings.sparse_top_k, candidates),
                 ),

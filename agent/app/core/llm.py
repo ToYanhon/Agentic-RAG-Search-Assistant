@@ -59,6 +59,9 @@ def build_llm(
 
     anthropic 走 ChatAnthropic（Messages API，bind_tools → 原生 tool_use 块）；
     其余（含 kimi/Moonshot）走 ChatOpenAI（OpenAI 兼容格式）。
+
+    max_tokens 取 settings.llm_max_tokens（A19）：防输出长度不可控；调用方如 rag 摘要
+    可逐调用传 max_tokens 覆盖（OpenAI/Anthropic 均支持 per-call 覆盖构造函数值）。
     """
     if temperature is None:
         temperature = settings.llm_temperature
@@ -77,6 +80,7 @@ def build_llm(
                 api_key=SecretStr(api_key) if api_key else SecretStr(""),
                 base_url=base_url or None,
                 temperature=anthropic_temp,
+                max_tokens=settings.llm_max_tokens,
                 timeout=timeout,
                 max_retries=max_retries,
             )
@@ -98,6 +102,7 @@ def _chat_openai(
         api_key=SecretStr(api_key) if api_key else None,
         base_url=base_url,
         temperature=temperature,
+        max_tokens=settings.llm_max_tokens,  # A19
         timeout=timeout,
         max_retries=max_retries,
     )

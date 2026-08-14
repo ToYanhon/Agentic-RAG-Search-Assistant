@@ -259,16 +259,16 @@ export default function Dashboard() {
   }
 
   /** 删除文件（单个图标）。 */
-  const handleDeleteFile = async (id: number) => {
+  const handleDeleteFile = useCallback(async (id: number) => {
     await deleteFile(id)
     await load()
-  }
+  }, [load])
 
   /** 删除文件夹。 */
-  const handleDeleteFolder = async (id: number) => {
+  const handleDeleteFolder = useCallback(async (id: number) => {
     await deleteFolder(id)
     await load()
-  }
+  }, [load])
 
   /** 重命名（文件或文件夹）。 */
   const handleRename = async (name: string) => {
@@ -292,38 +292,38 @@ export default function Dashboard() {
   }
 
   /** 拖拽移动：文件到目标文件夹（null 表示根目录）。 */
-  const handleDropFile = async (id: number, targetFolderId: number | null) => {
+  const handleDropFile = useCallback(async (id: number, targetFolderId: number | null) => {
     try {
       await moveFile(id, targetFolderId ?? 0)
       await load()
     } catch { /* 目标校验失败（如文件夹不存在）时忽略 */ }
-  }
+  }, [load])
 
   /** 拖拽移动：文件夹到目标文件夹（null 表示根目录）；循环引用由后端拦截。 */
-  const handleDropFolder = async (id: number, targetFolderId: number | null) => {
+  const handleDropFolder = useCallback(async (id: number, targetFolderId: number | null) => {
     try {
       await moveFolder(id, targetFolderId ?? 0)
       await load()
     } catch { /* 循环引用等由后端返回错误，保持原样 */ }
-  }
+  }, [load])
 
   /** 删除单个文件（带确认）。 */
-  const requestDeleteFile = (f: FileItem) => {
+  const requestDeleteFile = useCallback((f: FileItem) => {
     setConfirm({
       title: '删除文件',
       message: `确定要删除「${f.name}」吗？此操作不可撤销。`,
       onConfirm: async () => { await handleDeleteFile(f.id); if (selectedIds.has(f.id)) { selectedIds.delete(f.id); setSelectedIds(new Set(selectedIds)) } },
     })
-  }
+  }, [handleDeleteFile, selectedIds])
 
   /** 删除单个文件夹（带确认）。 */
-  const requestDeleteFolder = (folder: Folder) => {
+  const requestDeleteFolder = useCallback((folder: Folder) => {
     setConfirm({
       title: '删除文件夹',
       message: `确定要删除文件夹「${folder.name}」及其全部内容吗？此操作不可撤销。`,
       onConfirm: async () => { await handleDeleteFolder(folder.id) },
     })
-  }
+  }, [handleDeleteFolder])
 
   /** 批量删除选中文件（带确认）。 */
   const requestDeleteSelected = () => {
@@ -336,7 +336,7 @@ export default function Dashboard() {
   }
 
   /** 带 token 下载文件（浏览器直接 href 不会携带 Authorization，会 401）。 */
-  const handleDownload = async (f: FileItem) => {
+  const handleDownload = useCallback(async (f: FileItem) => {
     const token = localStorage.getItem('token')
     const resp = await fetch(getDownloadUrl(f.id), {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -349,7 +349,7 @@ export default function Dashboard() {
     a.download = f.name
     a.click()
     URL.revokeObjectURL(url)
-  }
+  }, [])
 
   /** 提交搜索：在主区显示搜索结果视图。 */
   const handleSearch = async () => {
@@ -373,18 +373,18 @@ export default function Dashboard() {
   }
 
   /** 创建分享并打开分享弹窗。 */
-  const handleShare = async (f: FileItem) => {
+  const handleShare = useCallback(async (f: FileItem) => {
     try {
       const res = await createShare(f.id)
       if (res) setShare({ id: res.id, token: res.token, file: f })
     } catch { /* 创建失败忽略 */ }
-  }
+  }, [])
 
   /** AI 总结：交由右侧 Copilot 抽屉新建会话执行（抽屉已注入用户 AI 配置头）。 */
-  const handleSummarizeFile = (f: FileItem) => {
+  const handleSummarizeFile = useCallback((f: FileItem) => {
     setCopilotOpen(true)
     setSummaryRequest((prev) => ({ file: f, nonce: (prev?.nonce ?? 0) + 1 }))
-  }
+  }, [])
 
   /** 取消分享。 */
   const handleCancelShare = async (id: number) => {
@@ -392,7 +392,7 @@ export default function Dashboard() {
   }
 
   /** 切换单个文件的索引状态（已索引 → 取消，否则建立）。 */
-  const handleToggleIndexFile = async (f: FileItem) => {
+  const handleToggleIndexFile = useCallback(async (f: FileItem) => {
     const indexed = indexedMap[f.id] === true
     try {
       if (indexed) {
@@ -415,10 +415,10 @@ export default function Dashboard() {
     } catch {
       showToast('索引请求失败')
     }
-  }
+  }, [indexedMap, updateIndexed, showToast])
 
   /** 切换文件夹索引状态（递归；全部已索引 → 取消，否则建立，跳过已索引）。 */
-  const handleToggleIndexFolder = async (folder: Folder, allIndexed: boolean) => {
+  const handleToggleIndexFolder = useCallback(async (folder: Folder, allIndexed: boolean) => {
     try {
       if (allIndexed) {
         showToast(`正在取消「${folder.name}」索引…`)
@@ -435,7 +435,21 @@ export default function Dashboard() {
     } catch {
       showToast('索引请求失败')
     }
-  }
+  }, [showToast])
+
+  /** 打开重命名/移动对话框（稳定引用，供 FileTree memo 使用）。 */
+  const openRenameFileDialog = useCallback((id: number, currentName: string) => {
+    setDialog({ mode: 'rename-file', id, name: currentName })
+  }, [])
+  const openMoveFileDialog = useCallback((id: number, currentName: string) => {
+    setDialog({ mode: 'move-file', id, name: currentName })
+  }, [])
+  const openRenameFolderDialog = useCallback((id: number, currentName: string) => {
+    setDialog({ mode: 'rename-folder', id, name: currentName })
+  }, [])
+  const openMoveFolderDialog = useCallback((id: number, currentName: string) => {
+    setDialog({ mode: 'move-folder', id, name: currentName })
+  }, [])
 
   /** 多选批量索引：全部已索引 → 取消；否则仅对未索引的建立。 */
   const handleEmbedSelected = async () => {
@@ -481,14 +495,14 @@ export default function Dashboard() {
   }
 
   /** 切换单文件选择。 */
-  const toggleSelect = (id: number) => {
+  const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
-  }
+  }, [])
 
   /** 全选 / 取消全选。 */
   const toggleSelectAll = () => {
@@ -632,10 +646,10 @@ export default function Dashboard() {
                   onFilesVisible={handleFilesVisible}
                   onToggleIndexFile={handleToggleIndexFile}
                   onToggleIndexFolder={handleToggleIndexFolder}
-                  onRenameFile={(id, name) => setDialog({ mode: 'rename-file', id, name })}
-                  onMoveFile={(id, name) => setDialog({ mode: 'move-file', id, name })}
-                  onRenameFolder={(id, name) => setDialog({ mode: 'rename-folder', id, name })}
-                  onMoveFolder={(id, name) => setDialog({ mode: 'move-folder', id, name })}
+                  onRenameFile={openRenameFileDialog}
+                  onMoveFile={openMoveFileDialog}
+                  onRenameFolder={openRenameFolderDialog}
+                  onMoveFolder={openMoveFolderDialog}
                   onDropFile={handleDropFile}
                   onDropFolder={handleDropFolder}
                   refreshKey={treeEpoch}

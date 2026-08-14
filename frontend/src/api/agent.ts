@@ -123,11 +123,12 @@ export async function deleteMemory(keyword: string) {
 
 /**
  * 发送消息（SSE 流式）。
- * fetch 手动处理 text/event-stream，逐事件产出。
+ * fetch 手动处理 text/event-stream，逐事件产出；signal 用于切换/关闭会话时中止流（F2）。
  */
 export async function* sendMessageStream(
   sessionId: string,
   message: string,
+  signal?: AbortSignal,
 ): AsyncGenerator<ChatStreamEvent> {
   const token = localStorage.getItem('token')
   const resp = await fetch(`/api/v1/agent/chat/sessions/${sessionId}/messages`, {
@@ -139,6 +140,7 @@ export async function* sendMessageStream(
       ...aiRequestHeaders(),
     },
     body: JSON.stringify({ message }),
+    signal,
   })
   if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`)
 

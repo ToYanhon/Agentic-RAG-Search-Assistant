@@ -77,13 +77,21 @@ public class AuthFilter extends OncePerRequestFilter {
         }
 
         String auth = request.getHeader("Authorization");
-        if (auth == null || auth.length() < 8 || !auth.startsWith("Bearer ")) {
+        String tokenStr = null;
+        if (auth != null && auth.length() >= 8 && auth.startsWith("Bearer ")) {
+            tokenStr = auth.substring(7);
+        } else if (isDownloadPath(request)) {
+            // F4：视频流式 `<video>` 元素无法携带 Authorization 头，仅下载路径允许 ?token= 查询参数回退
+            // （不扩大到其他路由，避免削弱信任链；query token 与 header token 等价，仅限 72h JWT）
+            tokenStr = request.getParameter("token");
+        }
+        if (tokenStr == null || tokenStr.isEmpty()) {
             writeError(response, ErrorCode.UNAUTHORIZED, "missing or malformed token");
             return;
         }
         JwtService.TokenData td;
         try {
-            td = jwt.parse(auth.substring(7));
+            td = jwt.parse(tokenStr);
         } catch (JwtException | IllegalArgumentException e) {
             writeError(response, ErrorCode.TOKEN_EXPIRED, "invalid or expired token");
             return;
@@ -106,6 +114,11 @@ public class AuthFilter extends OncePerRequestFilter {
         }
         return "POST".equals(method)
                 && (path.endsWith("/login") || path.endsWith("/register") || path.endsWith("/logout"));
+    }
+
+    /** 下载端点（F4 视频流式允许 ?token= 查询参数回退鉴权）。 */
+    private boolean isDownloadPath(HttpServletRequest request) {
+        return request.getRequestURI().endsWith("/download");
     }
 
     private void writeError(HttpServletResponse response, ErrorCode code, String message) throws IOException {

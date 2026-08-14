@@ -41,23 +41,17 @@ def _tree():
 
 def test_folder_files_recursive(monkeypatch):
     class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
-        async def get(self, url, params=None):
+        async def get(self, url, params=None, headers=None, timeout=None):
             return _FakeResp(200, _tree())
+
+    async def fake_client():
+        return _Client()
 
     async def fake_token():
         return "tok"
 
+    monkeypatch.setattr(idx, "get_http_client", fake_client)
     monkeypatch.setattr(idx, "get_internal_token", fake_token)
-    monkeypatch.setattr(idx.httpx, "AsyncClient", _Client)
 
     files = run(idx._folder_files(1, 7))
     assert [f["id"] for f in files] == [11, 12, 21]
@@ -66,31 +60,51 @@ def test_folder_files_recursive(monkeypatch):
 
 def test_folder_files_error_returns_empty(monkeypatch):
     class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
-        async def get(self, url, params=None):
+        async def get(self, url, params=None, headers=None, timeout=None):
             return _FakeResp(404, None)
+
+    async def fake_client():
+        return _Client()
 
     async def fake_token():
         return "tok"
 
+    monkeypatch.setattr(idx, "get_http_client", fake_client)
     monkeypatch.setattr(idx, "get_internal_token", fake_token)
-    monkeypatch.setattr(idx.httpx, "AsyncClient", _Client)
 
     assert run(idx._folder_files(1, 7)) == []
 
 
-def test_index_one_skips_oversize(monkeypatch):
+def _mock_meta(monkeypatch, meta):
+    async def fake_meta(fid, uid):
+        return meta
+
+    monkeypatch.setattr(idx.rag, "file_meta", fake_meta)
+
+
+def test_index_one_skips_oversize_via_meta(monkeypatch):
+    """A12 回归：元数据显示超大 → 不下载直接跳过。"""
+    downloaded = []
+
+    async def fake_download(fid, uid):
+        downloaded.append(fid)
+        return b"small"
+
+    _mock_meta(monkeypatch, {"name": "big.bin", "size": idx.INDEX_MAX_BYTES + 1})
+    monkeypatch.setattr(idx.rag, "download", fake_download)
+
+    result = run(idx._index_one(1, 7, "big.bin"))
+    assert result["status"] == "skipped"
+    assert result["reason"] == "file too large"
+    assert downloaded == []  # 未触发下载
+
+
+def test_index_one_skips_oversize_fallback(monkeypatch):
+    """元数据缺失时回退「下载后判大小」的旧逻辑。"""
     async def fake_download(fid, uid):
         return b"x" * (idx.INDEX_MAX_BYTES + 1)
 
+    _mock_meta(monkeypatch, None)
     monkeypatch.setattr(idx.rag, "download", fake_download)
 
     result = run(idx._index_one(1, 7, "big.txt"))
@@ -107,6 +121,7 @@ def test_index_one_indexes(monkeypatch):
     async def fake_index_file(fid, uid, chunks, chunk_type="text"):
         seen.append(chunk_type)
 
+    _mock_meta(monkeypatch, {"name": "a.txt", "size": 100})
     monkeypatch.setattr(idx.rag, "download", fake_download)
     monkeypatch.setattr(idx.searcher, "index_file", fake_index_file)
 

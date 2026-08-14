@@ -101,7 +101,7 @@ public class FolderService {
         folderRepo.updateParent(id, targetParentId);
     }
 
-    /** 级联删除：删本文件夹及其子树内全部文件（含 Agent unindex），并删根文件夹记录。 */
+    /** 级联删除：删本文件夹及其子树内全部文件（含 Agent unindex），并删除根与全部子文件夹记录。 */
     @Transactional
     public void delete(Long id, Long ownerId) {
         Folder f = folderRepo.findById(id)
@@ -111,6 +111,7 @@ public class FolderService {
         }
         List<Long> childIds = folderRepo.collectChildIds(id);
         fileService.deleteByFolderIds(childIds);
-        folderRepo.deleteById(id);
+        // childIds 已含根文件夹 id：批量删除全部文件夹行，避免留下孤儿子文件夹记录（D7）
+        folderRepo.deleteAllByIdInBatch(childIds);
     }
 }

@@ -224,6 +224,73 @@ def test_tool_result_wrapped_as_untrusted(monkeypatch):
     assert "«/untrusted_tool_result_escaped»" in wrapped
 
 
+def test_clip_tool_result():
+    """A8：工具结果按「单条上限 + 剩余合计预算」裁剪。"""
+    from app.agent import workflow as wf
+
+    # 短文本不截断
+    assert wf._clip_tool_result("短", wf.MAX_TOOL_RESULT_TOTAL) == ("短", 1)
+    # 超单条上限：裁到 2000 并加截断标记，消耗 2000
+    big = "x" * (wf.MAX_TOOL_RESULT_CHARS + 100)
+    clipped, used = wf._clip_tool_result(big, wf.MAX_TOOL_RESULT_TOTAL)
+    assert used == wf.MAX_TOOL_RESULT_CHARS
+    assert clipped.endswith("…[结果已截断]")
+    assert len(clipped) == wf.MAX_TOOL_RESULT_CHARS + len("…[结果已截断]")
+    # 受剩余预算约束：预算 30 → 裁到 30
+    out, used2 = wf._clip_tool_result("x" * 50, 30)
+    assert used2 == 30
+    assert len(out) == 30 + len("…[结果已截断]")
+    # 预算耗尽：跳过且不占预算
+    out3, used3 = wf._clip_tool_result("whatever", 0)
+    assert used3 == 0
+    assert "已因合计超限被跳过" in out3
+
+
+def test_tool_result_truncated_before_context(monkeypatch):
+    """A8 回归：超长工具结果进上下文前被截断（防撑爆上下文）。"""
+    import app.service.memory_service as ms
+    from app.agent.workflow import MAX_TOOL_RESULT_CHARS
+
+    session = _FakeSession()
+    memory = _FakeMemory()
+    _patch_session(monkeypatch, session)
+
+    long_text = "长" * (MAX_TOOL_RESULT_CHARS + 1000)
+
+    async def fake_get_memory(uid):
+        return [long_text]
+
+    monkeypatch.setattr(ms, "get_memory", fake_get_memory)
+
+    fake = _ScriptedLLM(
+        [
+            {"tool_call_chunks": _tool_call("transfer_to_general", "c1"), "usage_metadata": _USAGE},
+            {"tool_call_chunks": _tool_call("get_memory", "c2"), "usage_metadata": _USAGE},
+            {"content": "已核对", "usage_metadata": _USAGE},
+            {"content": "好的", "usage_metadata": _USAGE},
+        ]
+    )
+    monkeypatch.setattr("app.agent.workflow.build_llm", lambda **kw: fake)
+
+    wf, session = _make_workflow(session, memory)
+
+    async def run():
+        return [ev async for ev in wf.turn(1, "s1", "查看记忆")]
+
+    asyncio.run(run())
+
+    wrapped = [
+        m["content"]
+        for m in session.persisted
+        if m["role"] == "tool" and m["content"].startswith("«untrusted_tool_result»")
+    ]
+    assert wrapped, "工具结果应被持久化"
+    # 原始长文本被截断：包裹后内容远小于原始长度，且带截断标记
+    assert "已截断" in wrapped[0]
+    assert len(wrapped[0]) < len(long_text) * 2
+    assert "长" * (MAX_TOOL_RESULT_CHARS + 1) not in wrapped[0]
+
+
 def test_supervisor_transfer_loop_bounded(monkeypatch):
     """A4 回归：LLM 反复 transfer ping-pong 时，协作轮次 ≤ MAX_SUPERVISOR_ROUNDS，
     且仍以最近 worker 文本作为最终答复。"""
@@ -282,3 +349,60 @@ def test_supervisor_wraps_up_when_worker_silent_at_cap(monkeypatch):
     assert len(routes) == MAX_SUPERVISOR_ROUNDS
     assert texts and texts[-1] == "已达上限，直接答复"
     assert events[-1]["type"] == "done"
+
+
+def test_time_context_not_persisted(monkeypatch):
+    """A13：当前时间只进本次 LLM 上下文，持久化的用户消息不含时间。"""
+    session = _FakeSession()
+    _patch_session(monkeypatch, session)
+    fake = _ScriptedLLM([{"content": "你好呀"}])
+    monkeypatch.setattr("app.agent.workflow.build_llm", lambda **kw: fake)
+
+    wf, session = _make_workflow(session)
+
+    async def run():
+        return [ev async for ev in wf.turn(1, "s1", "现在几点")]
+
+    asyncio.run(run())
+    user_msgs = [m for m in session.persisted if m["role"] in ("user", "human")]
+    assert user_msgs, "应有持久化的用户消息"
+    assert "## 当前时间" not in user_msgs[0]["content"]
+    assert user_msgs[0]["content"] == "现在几点"
+
+
+def test_worker_fallback_when_rounds_exhausted(monkeypatch):
+    """A14：worker 达 MAX_TOOL_ROUNDS 且始终无文本时，补兜底最终答复。"""
+    import app.service.memory_service as ms
+    from app.agent.workflow import MAX_TOOL_ROUNDS
+
+    session = _FakeSession()
+    memory = _FakeMemory()
+    _patch_session(monkeypatch, session)
+
+    async def fake_get_memory(uid):
+        return ["偏好英文"]
+
+    monkeypatch.setattr(ms, "get_memory", fake_get_memory)
+
+    fake = _ScriptedLLM(
+        [
+            {"tool_call_chunks": _tool_call("transfer_to_general", "c1"), "usage_metadata": _USAGE},
+            {"tool_call_chunks": _tool_call("get_memory", "c2"), "usage_metadata": _USAGE},
+        ]
+    )
+    monkeypatch.setattr("app.agent.workflow.build_llm", lambda **kw: fake)
+
+    wf, session = _make_workflow(session, memory)
+
+    async def run():
+        return [ev async for ev in wf.turn(1, "s1", "处理")]
+
+    events = asyncio.run(run())
+    texts = [e["content"] for e in events if e["type"] == "text"]
+    assert texts, "应有兜底文本"
+    assert "最大工具调用轮次" in texts[-1]
+    # 兜底文案被持久化（supervisor 收尾可能追加一条空 ai，故用包含断言）
+    persisted_contents = [m.get("content", "") for m in session.persisted]
+    assert texts[-1] in persisted_contents
+    starts = [e for e in events if e["type"] == "tool_start"]
+    assert len(starts) <= MAX_TOOL_ROUNDS

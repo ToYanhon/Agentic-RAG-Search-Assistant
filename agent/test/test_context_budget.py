@@ -28,6 +28,14 @@ def test_estimate_tokens():
     assert cb.estimate_tokens("hello world" * 10) == 110 // 4 + 4
 
 
+def test_estimate_tokens_long_text_sampling():
+    """A9：超长文本抽样估算，比例合理且不报错。"""
+    est = cb.estimate_tokens("中" * 20000)
+    assert 19000 <= est <= 21000  # 纯非 ASCII ≈ 每字 1 token
+    est2 = cb.estimate_tokens("a" * 20000)
+    assert 4900 <= est2 <= 5100  # 纯 ASCII ≈ 每 4 字符 1 token
+
+
 def test_budget_small_window():
     assert cb._budget_tokens(8000) == 4800
     assert cb._budget_tokens(128000) == 128000 - cb.OUTPUT_RESERVE_BIG
@@ -178,6 +186,33 @@ def test_keep_recent_turns_regardless_of_budget(monkeypatch):
     assert 11 in kept_rows
     assert 1 not in kept_rows  # 早期被折叠
     assert r.truncated
+
+
+def test_recent_turns_bounded_by_budget(monkeypatch):
+    """A20：最近 N 轮也受预算约束——预算装不下时较新的组同样折叠（不再无条件越预算）。"""
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 3)
+    # 每条 120 非 ASCII ≈ 120 token；budget(300)→180，human≈4 → 只装得下最新 1 组
+    h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(6)])
+    r = run(cb.build_context(h, "问", 300, None))
+    kept_rows = sorted(m["rowid"] for m in r.messages if "rowid" in m)
+    assert 11 in kept_rows    # 最新组保留
+    assert 9 not in kept_rows  # 次新组放不下 → 折叠（尽管在 keep_turns 窗口内）
+    assert r.truncated
+
+
+def test_estimated_tokens_includes_summary(monkeypatch):
+    """A20：estimated_tokens 计入摘要消息。"""
+    monkeypatch.setattr(cb.settings, "context_keep_turns", 0)
+    h = _mk([(i * 2 + 1, "user", "大" * 120) for i in range(10)])
+
+    async def fake_gen(prev_summary, msgs):
+        return ("测试摘要", {"input_tokens": 5, "output_tokens": 3})
+
+    with patch.object(cb, "_generate_summary", fake_gen):
+        r = run(cb.build_context(h, "问", 500, None))
+    assert r.summary_used
+    summary_msg = f"【对话摘要（含过往与最近进展）】测试摘要"
+    assert r.estimated_tokens >= cb.estimate_tokens(summary_msg)
 
 
 def run_future(value):

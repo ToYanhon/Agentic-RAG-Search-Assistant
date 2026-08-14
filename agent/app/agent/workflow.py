@@ -41,6 +41,10 @@ MAX_TOOL_ROUNDS = 6  # 单个 worker 内最大工具循环次数（防失控）
 # supervisor 最大 worker 转移/协作次数：LLM 反复 transfer ping-pong 时截断，
 # 防止每次转移都触发完整 ReAct 循环导致成本/延迟失控（IMPROVEMENTS.md A4）
 MAX_SUPERVISOR_ROUNDS = 3
+# 工具结果进上下文的大小上限：单次 ≤2000 字符、单回合合计 ≤8000（IMPROVEMENTS.md A8）
+MAX_TOOL_RESULT_CHARS = 2000
+MAX_TOOL_RESULT_TOTAL = 8000
+_TOOL_CLIP_SUFFIX = "…[结果已截断]"
 
 # 疑似 API Key（sk-…）正则，错误摘要里剥掉防泄露
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{6,}")
@@ -57,6 +61,19 @@ def _wrap_tool_result(content: str) -> str:
     """把工具结果包进不可信数据边界；内容中出现的结束标记一律转义。"""
     safe = content.replace(_UNTRUSTED_END, _UNTRUSTED_END_ESCAPED)
     return f"{_UNTRUSTED_START}\n{safe}\n{_UNTRUSTED_END}"
+
+
+def _clip_tool_result(text: str, remaining: int) -> tuple[str, int]:
+    """把工具结果裁到「单条上限与剩余合计预算」之内，返回 (裁剪后文本, 消耗字符数)。
+
+    预算耗尽返回占位提示（不占预算）；超限追加截断标记，防止大文件撑爆上下文（A8）。
+    """
+    if remaining <= 0:
+        return "[工具结果已因合计超限被跳过]", 0
+    limit = min(MAX_TOOL_RESULT_CHARS, remaining)
+    if len(text) <= limit:
+        return text, len(text)
+    return text[:limit] + _TOOL_CLIP_SUFFIX, limit
 
 
 def _sanitize_error(e: Exception) -> str:
@@ -139,6 +156,8 @@ class AgentWorkflow:
         model = current_model()
         provider = current_provider()
         mm = model_meta(provider, model)
+        # A13：附加到 user 消息末尾的时间上下文，持久化前还原（不入历史）
+        time_ctx: tuple | None = None
 
         # 1. 前置：历史 / 记忆 / 技能 / 上下文折叠
         try:
@@ -153,7 +172,9 @@ class AgentWorkflow:
                 last = messages[-1]
                 from app.prompt.prompts import current_time_context
 
-                last.content = f"{last.content}\n\n{current_time_context()}"
+                original = last.content
+                last.content = f"{original}\n\n{current_time_context()}"
+                time_ctx = (last, original)  # A13：持久化前还原
             if budget.summary_usage:
                 record_stream_usage(budget.summary_usage, model)
                 usage["in"] += int(budget.summary_usage.get("input_tokens") or 0)
@@ -172,6 +193,9 @@ class AgentWorkflow:
             yield {"type": "error", "content": _sanitize_error(e)}
         finally:
             # 3. 持久化（走统一骨架重试，最终失败仅日志；不因失败中断 SSE 收尾）
+            # A13：先还原被附加时间的 user 消息，时间不入历史/前端展示
+            if time_ctx is not None:
+                time_ctx[0].content = time_ctx[1]
             dicts: list[dict] = []
             try:
                 persistable = [m for m in messages if not isinstance(m, SystemMessage)]
@@ -256,6 +280,8 @@ class AgentWorkflow:
         # worker 完成且已输出文本答复时，抑制 supervisor 收尾复述（避免重复内容）
         worker_spoke = False
         transfers = 0
+        # 单回合工具结果合计预算（跨多个 worker 执行共享，A8）
+        tool_budget: list[int] = [MAX_TOOL_RESULT_TOTAL]
         while True:
             # 达到最大协作轮次：不再转移，直接收尾（成本上限）
             if transfers >= MAX_SUPERVISOR_ROUNDS:
@@ -321,7 +347,7 @@ class AgentWorkflow:
             route_decisions.inc(1, {"to": target})
             yield {"type": "route", "to": target}
             async for ev in self._worker(
-                target, messages, usage, memories, skills_context
+                target, messages, usage, memories, skills_context, tool_budget
             ):
                 if ev["type"] == "text" and ev.get("content"):
                     worker_spoke = True
@@ -336,10 +362,12 @@ class AgentWorkflow:
         usage: dict[str, int],
         memories: list[str],
         skills_context: str,
+        tool_budget: list[int],
     ) -> AsyncIterator[dict[str, Any]]:
         tools = self.tools.for_worker(worker)
         llm = self._llm(tools)
         sys_prompt = build_worker_prompt(worker, memories, skills_context)
+        spoke = False
 
         for _ in range(MAX_TOOL_ROUNDS):
             out: list = []
@@ -347,6 +375,7 @@ class AgentWorkflow:
                 llm, [SystemMessage(content=sys_prompt)] + messages, usage, out
             ):
                 if text:
+                    spoke = True
                     yield {"type": "text", "content": text}
             ai = out[0]
             messages.append(ai)
@@ -359,14 +388,22 @@ class AgentWorkflow:
                 tid = tc.get("id") or uuid.uuid4().hex
                 yield {"type": "tool_start", "name": tname}
                 result = await self.tools.execute(tname, targs)
-                yield {"type": "tool_end", "name": tname, "result": str(result)[:300]}
+                clipped, used = _clip_tool_result(str(result), tool_budget[0])
+                tool_budget[0] -= used
+                yield {"type": "tool_end", "name": tname, "result": clipped[:300]}
                 messages.append(
                     ToolMessage(
-                        content=_wrap_tool_result(str(result)),
+                        content=_wrap_tool_result(clipped),
                         tool_call_id=tid,
                         id=uuid.uuid4().hex,
                     )
                 )
+
+        # A14：达 MAX_TOOL_ROUNDS 且始终未产出文本 → 补兜底答复（避免无最终回复）
+        if not spoke:
+            fallback = "已达到最大工具调用轮次，未能完成该请求；请简化需求或拆分后重试。"
+            yield {"type": "text", "content": fallback}
+            messages.append(AIMessage(content=fallback))
 
     # ---------- 流式 LLM 调用 ----------
 

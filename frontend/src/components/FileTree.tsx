@@ -1,5 +1,5 @@
 /** 文件树视图：递归展示目录层级与文件，支持多选（联动 Copilot）、行内操作菜单与拖拽移动。 */
-import { useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { getFolderTree } from '../api/folders'
 import { getFolderIndexStatus } from '../api/agent'
 import { formatBytes } from '../utils/format'
@@ -142,7 +142,8 @@ interface NodeProps {
   refreshKey: number
 }
 
-function FolderNode(props: NodeProps) {
+/** 文件夹节点（F7：memo——父级无关重渲染（上传进度/toast）时跳过本子树）。 */
+const FolderNode = memo(function FolderNode(props: NodeProps) {
   const { folder, depth, expandedIds, selectedIds, indexedMap, onFilesVisible, onToggleExpand, onToggle, onDeleteFile, onDeleteFolder, onDownload, onPreview, onShareFile, onSummarizeFile, onToggleIndexFile, onRenameFile, onMoveFile, onRenameFolder, onMoveFolder, onToggleIndexFolder, onDropFile, onDropFolder, refreshKey } = props
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -150,6 +151,8 @@ function FolderNode(props: NodeProps) {
   const [sub, setSub] = useState<{ folders?: Folder[]; files?: FileItem[] }>({})
   // 本文件夹是否全部文件已索引（点开菜单时查询）
   const [folderAllIndexed, setFolderAllIndexed] = useState(false)
+  // F7：防抖合并 refreshKey 突发 + 重叠防护（同一节点并发只发一次请求）
+  const fetchingRef = useRef(false)
 
   const expanded = expandedIds.has(folder.id)
 
@@ -157,13 +160,21 @@ function FolderNode(props: NodeProps) {
   useEffect(() => {
     if (!expanded) return
     let cancelled = false
-    getFolderTree(folder.id).then((res) => {
-      if (cancelled) return
-      if (res.data) {
-        setSub({ folders: res.data.children ?? [], files: res.data.files ?? [] })
-      }
-    })
-    return () => { cancelled = true }
+    const timer = window.setTimeout(() => {
+      if (cancelled || fetchingRef.current) return
+      fetchingRef.current = true
+      getFolderTree(folder.id).then((res) => {
+        if (cancelled) return
+        if (res.data) {
+          setSub({ folders: res.data.children ?? [], files: res.data.files ?? [] })
+        }
+      }).catch(() => {
+        /* 拉取失败保持旧子树 */
+      }).finally(() => {
+        fetchingRef.current = false
+      })
+    }, 200)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [expanded, folder.id, refreshKey])
 
   // 子树文件可见 → 上报索引状态查询
@@ -290,7 +301,7 @@ function FolderNode(props: NodeProps) {
       )}
     </div>
   )
-}
+})
 
 /* ---------------- 根视图 ---------------- */
 export default function FileTree({ folders, rootFiles, selectedIds, indexedMap, onFilesVisible, onToggle, onDeleteFile, onDeleteFolder, onDownload, onPreview, onShareFile, onSummarizeFile, onToggleIndexFile, onRenameFile, onMoveFile, onRenameFolder, onMoveFolder, onToggleIndexFolder, onDropFile, onDropFolder, refreshKey = 0 }: FileTreeProps) {
@@ -303,14 +314,14 @@ export default function FileTree({ folders, rootFiles, selectedIds, indexedMap, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rootFiles.length])
 
-  const toggleExpand = (id: number) => {
+  const toggleExpand = useCallback((id: number) => {
     setExpandedIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
-  }
+  }, [])
 
   /** 拖到根目录区域：移到根（targetFolderId = null）。 */
   const handleRootDrop = (e: React.DragEvent<HTMLDivElement>) => {

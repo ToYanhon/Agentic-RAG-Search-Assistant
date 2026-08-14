@@ -5,6 +5,9 @@ export type PreviewKind = 'image' | 'pdf' | 'text' | 'video' | null
 /** 文本预览上限：超过则提示下载而非整文件读入内存。 */
 export const TEXT_PREVIEW_MAX = 2 * 1024 * 1024
 
+/** 非文本（图片/PDF）预览上限：超过提示下载。视频走 Range 流式不受此限（F4）。 */
+export const NON_TEXT_PREVIEW_MAX = 200 * 1024 * 1024
+
 const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp']
 const TEXT_EXT = ['txt', 'md', 'markdown', 'csv', 'json', 'xml', 'yml', 'yaml', 'ini', 'log', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'py', 'go', 'java', 'c', 'h', 'cpp', 'cc', 'cxx', 'hpp', 'sh', 'bat', 'sql']
 const VIDEO_EXT = ['mp4', 'webm', 'mov', 'mkv']

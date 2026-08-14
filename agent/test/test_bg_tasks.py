@@ -78,6 +78,25 @@ async def test_run_bg_retries_then_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_run_bg_holds_strong_reference():
+    """A5 回归：运行中的任务被 _BG_TASKS 持强引用（防 GC 静默取消），完成后自动移除。"""
+    from app.core import bg_tasks
+
+    done = asyncio.Event()
+
+    async def op():
+        await asyncio.sleep(0.01)
+        done.set()
+
+    task = run_bg(op, name="ref")
+    assert task in bg_tasks._BG_TASKS  # 运行中持有强引用
+    await asyncio.wait_for(done.wait(), timeout=1)
+    await asyncio.wait_for(task, timeout=1)
+    await asyncio.sleep(0)  # 让 done 回调有机会执行
+    assert task not in bg_tasks._BG_TASKS  # 完成后移除，不泄漏
+
+
+@pytest.mark.asyncio
 async def test_cancelled_propagates():
     started = asyncio.Event()
 

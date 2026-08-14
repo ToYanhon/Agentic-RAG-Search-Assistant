@@ -85,6 +85,7 @@ public class MultipartController {
         data.put("upload_id", meta.getUploadId());
         data.put("chunk_size", meta.getChunkSize());
         data.put("total_chunks", meta.getTotalChunks());
+        data.put("remaining", meta.getRemaining()); // D3：剩余可用配额（字节）
         return Resp.created(data);
     }
 
