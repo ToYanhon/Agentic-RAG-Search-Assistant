@@ -60,9 +60,13 @@ services:
       - "8080:8080"
     environment:
       APP_MODE: prod
-      # Java 后端配置覆盖（prod 必须提供 LLM 加密主密钥 ≥32B；JWT secret 可覆盖）
+      # Go 后端配置（prod 必须提供 LLM 加密主密钥 ≥32B；JWT secret 可覆盖）
       CD_LLM_ENCRYPTION_KEY: ${CD_LLM_ENCRYPTION_KEY:-dev-only-llm-encryption-key-change-me-32b}
       CD_JWT_SECRET: ${CD_JWT_SECRET:-change-me-in-production}
+      CD_MYSQL_DSN: root:root@tcp(mysql:3306)/cloud_drive?parseTime=true&loc=Asia%2FShanghai
+      CD_REDIS_ADDR: redis:6379
+      CD_MINIO_ENDPOINT: minio:9000
+      CD_AGENT_BASE_URL: http://agent:8000
     depends_on:
       mysql:
         condition: service_healthy

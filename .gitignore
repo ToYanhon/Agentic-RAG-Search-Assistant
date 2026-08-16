@@ -12,10 +12,13 @@ logs/
 docs/
 diagrams/
 
+# 本地迁移规划，不纳入版本库
+spec/
+
 # SQLite runtime data (sessions/checkpoints)
 agent/data/
 
-# Java backend (backend)
+# Backend local/build files
 backend/target/
 *.tsbuildinfo
 backend/*.iml

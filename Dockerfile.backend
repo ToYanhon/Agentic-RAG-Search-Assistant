@@ -1,13 +1,14 @@
-# CloudDrive AI 后端（Java/Spring Boot）多阶段构建
-FROM maven:3.9-eclipse-temurin-21 AS builder
+# CloudDrive AI 后端（Go）多阶段构建
+FROM golang:1.25 AS builder
 WORKDIR /app
-COPY backend/pom.xml .
-RUN mvn -q dependency:go-offline
-COPY backend/src ./src
-RUN mvn -q package -DskipTests
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/cmd ./cmd
+COPY backend/internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /cloud-drive ./cmd/cloud-drive
 
-FROM eclipse-temurin:21-jre
+FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
-COPY --from=builder /app/target/backend-0.1.0.jar app.jar
+COPY --from=builder /cloud-drive ./cloud-drive
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["/app/cloud-drive"]

@@ -1,0 +1,7 @@
+{
+  "token_source": "java-jwt-fixture.json",
+  "allowed_path_suffix": "/download",
+  "allowed_method": "GET",
+  "ordinary_api_query_token_allowed": false,
+  "range_behavior": "not covered by auth fixture"
+}
