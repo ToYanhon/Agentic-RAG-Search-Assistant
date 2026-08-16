@@ -29,6 +29,9 @@ import (
 )
 
 func main() {
+	if err := config.LoadDotEnv(".env", "backend/.env"); err != nil {
+		log.Printf("dotenv 加载失败（继续使用环境变量与默认值）：%v", err)
+	}
 	settings := config.FromEnv()
 	database, err := sql.Open("mysql", settings.MySQLDSN)
 	if err != nil {

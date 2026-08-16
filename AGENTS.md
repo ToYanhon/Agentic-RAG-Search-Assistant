@@ -20,7 +20,7 @@ Agentic-RAG-Search-Assistant 是 AI 云盘。三个服务由 `docker-compose.yml
 ## 命令
 
 - 基础设施：`docker compose up -d mysql redis minio qdrant`。MinIO 宿主机 API 端口是 `localhost:9100`。
-- Backend：在 `backend/` 运行 `go run ./cmd/cloud-drive`、`go test ./...`、`go vet ./...`、`go build ./cmd/cloud-drive`。
+- Backend：在 `backend/` 运行 `go run ./cmd/cloud-drive`、`go test ./...`、`go vet ./...`、`go build ./cmd/cloud-drive`。本地配置可选 `copy .env.example .env`（godotenv 读取，真实环境变量优先）。
 - Agent：在 `agent/` 配置 `.env`，运行 `pip install -r requirements.txt`、`pytest test/`、`uvicorn app.main:app --reload --port 8000`。
 - Frontend：在 `frontend/` 运行 `npm install`、`npm run build`、`npm run dev`。
 - 启动 Go 后端验证时使用 `Start-Process` 后台运行并轮询 `/health`，不要阻塞等待。

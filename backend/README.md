@@ -22,17 +22,19 @@ internal/db/              # MySQL 持久化适配器
 ## 运行
 
 ```bash
+copy .env.example .env   # 本地配置（可选，真实环境变量优先）
 go run ./cmd/cloud-drive
 go test ./...
 ```
 
 需要基础设施：`docker compose up -d mysql redis minio qdrant`（MinIO API 端口 `localhost:9100`）。
 
-### 配置覆盖（与 Go 契约一致）
+### 配置
 
-- `APP_MODE` 选择 profile（dev/prod）
-- 任意字段 `CD_<SECTION>_<FIELD>` 覆盖，如 `CD_SERVER_PORT=8081`、`CD_MINIO_USE_SSL=true`、
-  `CD_LLM_ENCRYPTION_KEY=<>=32字节>`（prod 必设）、`CD_UPLOAD_DIRECT_MAX_BYTES`
+- 配置项使用 `CD_<SECTION>_<FIELD>` 环境变量覆盖，如 `CD_SERVER_PORT=8081`、`CD_MYSQL_DSN`、
+  `CD_LLM_ENCRYPTION_KEY=<>=32字节>`（prod 必设）、`CD_UPLOAD_DIRECT_MAX_BYTES`。
+- 支持 `backend/.env` 文件（类似 python-dotenv）：复制 `.env.example` 后填写即可。优先级为
+  **真实环境变量 > `.env` 文件 > 代码默认值**；Compose 注入或 shell 已设置的变量不会被 `.env` 覆盖。
 
 ## 当前进度
 

@@ -2,8 +2,11 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -24,6 +27,18 @@ type Config struct {
 	LLMEncryptionKey      string
 	ChunkMaxBytes         int64
 	FileMaxBytes          int64
+}
+
+// LoadDotEnv 读取 .env 文件并写入进程环境变量，供 FromEnv 使用。
+// 语义与 python-dotenv 对齐：真实环境变量优先，已存在的值不会被文件覆盖；
+// 文件不存在或为空时静默忽略，不视为错误。
+func LoadDotEnv(paths ...string) error {
+	for _, path := range paths {
+		if err := godotenv.Load(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func FromEnv() Config {
