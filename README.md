@@ -10,7 +10,7 @@
 - **检索一致性**：Qdrant 以 `user_id` payload 隔离多租户；文件删除/覆盖写/新建（上传/秒传/分块完成）由后端异步通知 Agent 维护向量索引——通知走 Redis 队列（`task:index_notify`），轮询消费 + 指数退避重试，Redis 不可用回退直发，避免已删/已改内容继续被检索、新文件立即可检索。
 - **数据一致性**：存储配额以条件原子预占为准（并发上传不超限，覆盖写扣除旧大小）；文件名为「owner + 文件夹 + 名称」唯一（根目录经生成列归一，冲突自动换名重试一次）；分块上传 init 预检配额、complete 实测合并字节数。
 - **在线预览**：文本按行读取（限长）；视频走 Range 206 流式（可拖动播放、不整文件进内存），图片/PDF 超 200MB 提示下载。
-- **可验证**：后端 JUnit、Agent pytest 全部离线可跑；自建中文检索评估集（精确匹配 / 语义改写 / 跨段三类），按 Recall@k / MRR 对比分块、精排与混合检索方案（【实测数据待补充】）。
+- **可验证**：后端 Go test、Agent pytest 全部离线可跑；自建中文检索评估集（精确匹配 / 语义改写 / 跨段三类，46 条查询），按 Recall@k / MRR 对比分块、精排与混合检索方案（top-k=5：混合检索召回 Recall@5=0.924 / MRR=0.917，优于固定分块纯稠密 0.833/0.704 与句子分块纯稠密 0.891/0.782；精排后 MRR 提升至 0.886-0.929）。
 - **多格式索引**：txt / PDF / docx 原生解析，xlsx / xls / pptx / ppt / csv / html 与 jpg / jpeg / png 图片经 MarkItDown 转 Markdown 文本进入同一向量链路；图片可选用用户配置的视觉 LLM 生成中文描述（OpenAI 兼容 provider），无视觉能力时自动跳过。代码 / 配置文件（py / js / ts / go / java / c / cc / cpp / h / hpp / css / json / xml 等）按纯文本接入同一链路，可被语义检索、按行读取、文本预览。
 - **Agent 工具**：file / web / general 三组（工具名与 schema 由注册表运行时注入，防漂移）。读文件支持按行 offset/limit + 非文本 MarkItDown 回退；创建/覆盖/编辑（`create_file` / `write_file_content` / `edit_file_content`）owner 限定、走 agent-only 接口，file 与 general 均可见；worker 已给出文本答复后 supervisor 收尾去重，避免重复输出。
 - **后台任务骨架**：进程内「尽力而为」任务统一重试语义（`bg_tasks`：`run_bg` / `await_with_retry`），记忆提炼与消息持久化失败可重试。
@@ -68,7 +68,7 @@ python -u test/eval_rag.py --with-rerank # 加跑 Cross-Encoder 终排，耗时�
 ## 已知边界 / 后续计划
 
 - 索引维护通知（删除/覆盖写/新建）走 Redis 队列 + 指数退避重试，但 agent 彻底不可达且重试超限时通知仍会被丢弃（尽力而为）；强一致需要 tombstone 或删除状态，尚未实现。
-- 检索评估集的数字尚未写入文档，待实测后补充。
+- 检索评估实测（`agent/test/fixtures/eval_corpus.json`，46 条查询，top-k=5）：召回阶段「固定分块 + 纯稠密」Recall@5=0.833、MRR=0.704；「句子分块 + 纯稠密」Recall@5=0.891、MRR=0.782；「句子分块 + 混合检索（RRF）」Recall@5=0.924、MRR=0.917。加入 Cross-Encoder 精排后 Recall@5 略降（0.757-0.786）但 MRR 提升至 0.886-0.929，符合「先召回再精排、精排优化排序」的设计。完整逐查询结果见 `agent/data/eval_results.json`（本地生成，不入库）。
 - 暂无 Query 改写（HyDE / step-back）与原生多模态向量（CLIP）索引；图像/Office 等通过 MarkItDown 文本化进入现有向量链路，多模态"理解"依赖用户配置的视觉 LLM，非视觉 provider 时图片索引被跳过。扫描版 PDF（无文本层）暂不支持 OCR。
 
 ## 文档

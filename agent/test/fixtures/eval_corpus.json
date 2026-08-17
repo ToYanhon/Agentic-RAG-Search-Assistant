@@ -1,24 +1,24 @@
 {
-  "version": 1,
+  "version": 2,
   "description": "CloudDrive AI RAG 离线评估语料。合成项目文档与公开资料摘要混合，相关文件按 file_id 标注。",
   "documents": [
     {
       "id": 1001,
       "name": "项目架构与请求链路.md",
       "source": "synthetic",
-      "text": "CloudDrive AI 采用 Java 主后端、Python Agent 和 React 前端三服务架构。Java 后端负责用户认证、文件元数据、对象存储、分享链接和 LLM 配置，Python Agent 负责对话编排、工具调用、语义索引和摘要，React 负责网盘界面与流式聊天。三个服务通过 Docker Compose 统一启动，开发环境后端监听 8080，Agent 监听 8000，前端 Vite 监听 5173，生产前端由 nginx 暴露 3000 端口。\n\n普通 REST 请求由前端的 api client 发送到 /api/v1，Agent 请求由 Java 的 AgentController 显式代理到 Python 路由。聊天响应使用 text/event-stream，Java 代理按块读取 Agent 返回的输入流并立即 flush，避免等待完整答案后才发送。代理层同时注入 X-User-Id、X-Request-Id 和用户的 X-LLM-* 配置，Agent 不直接暴露给公网。\n\n前端的公开分享访问使用 /s/:token，不依赖 JWT，并通过 VITE_BACKEND_ORIGIN 直连后端；其余受保护接口必须携带 Bearer token。服务之间的边界使文件业务和 Agent 编排可以独立演进，也让后端统一承担用户身份和敏感配置管理。"
+      "text": "CloudDrive AI 采用 Go 后端、Python Agent 和 React 前端三服务架构。Go 后端负责用户认证、文件元数据、对象存储、分享链接和 LLM 配置，Python Agent 负责对话编排、工具调用、语义索引和摘要，React 负责网盘界面与流式聊天。三个服务通过 Docker Compose 统一启动，开发环境后端监听 8080，Agent 监听 8000，前端 Vite 监听 5173，生产前端由 nginx 暴露 3000 端口。\n\n普通 REST 请求由前端的 api client 发送到 /api/v1，Agent 请求由 Go 的 agent 代理路由转发到 Python 路由。聊天响应使用 text/event-stream，Go 代理按块读取 Agent 返回的输入流并立即 flush，避免等待完整答案后才发送。代理层同时注入 X-User-Id、X-Request-Id 和用户的 X-LLM-* 配置，Agent 不直接暴露给公网。\n\n前端的公开分享访问使用 /s/:token，不依赖 JWT，并通过 VITE_BACKEND_ORIGIN 直连后端；其余受保护接口必须携带 Bearer token。服务之间的边界使文件业务和 Agent 编排可以独立演进，也让后端统一承担用户身份和敏感配置管理。"
     },
     {
       "id": 1002,
       "name": "认证与密钥安全方案.md",
       "source": "synthetic",
-      "text": "系统采用两层认证。用户访问 Java 后端时使用 Authorization Bearer JWT，AuthFilter 校验签名、过期时间和黑名单；Java 后端访问 Python Agent 时另外注入 X-Agent-Token，Agent 调用文件接口时也携带同一个内部 token。AgentTokenManager 将轮换后的 token 写入 Redis 键 internal:agent:token，Python 侧从同一键读取并缓存，遇到 401 会强制刷新后重试。内部密钥轮换方案编号为 SEC-9K42，用于测试 token 过期和重试路径。\n\n用户配置的 LLM API key 存在 llm_configs 表中，但数据库不保存明文。LLMConfigService 使用 AES-GCM 加密和主密钥解密，AgentController 根据 X-LLM-Provider 解析对应供应商，再注入 X-LLM-Base-URL、X-LLM-Key、X-LLM-Model。Tavily 密钥单独通过 X-Tavily-Key 传递。请求级配置使用 contextvar 保存，请求结束必须 reset，避免不同用户之间发生配置串扰。\n\nAgent 没有面向公网的独立身份认证，它信任 Java 代理注入的 X-User-Id。因此 Docker Compose 只把 8000 绑定到 127.0.0.1，不能把 Agent 端口直接暴露到公网，否则攻击者可以伪造任意用户身份。"
+      "text": "系统采用两层认证。用户访问 Go 后端时使用 Authorization Bearer JWT，认证中间件校验签名、过期时间和黑名单；Go 后端访问 Python Agent 时另外注入 X-Agent-Token，Agent 调用文件接口时也携带同一个内部 token。Go 的 Agent token 管理器将轮换后的 token 写入 Redis 键 internal:agent:token，Python 侧从同一键读取并缓存，遇到 401 会强制刷新后重试。内部密钥轮换方案编号为 SEC-9K42，用于测试 token 过期和重试路径。\n\n用户配置的 LLM API key 存在 llm_configs 表中，但数据库不保存明文。Go 的 LLM 配置服务使用 AES-GCM 加密和主密钥解密，Go 代理根据 X-LLM-Provider 解析对应供应商，再注入 X-LLM-Base-URL、X-LLM-Key、X-LLM-Model。Tavily 密钥单独通过 X-Tavily-Key 传递。请求级配置使用 contextvar 保存，请求结束必须 reset，避免不同用户之间发生配置串扰。\n\nAgent 没有面向公网的独立身份认证，它信任 Go 代理注入的 X-User-Id。因此 Docker Compose 只把 8000 绑定到 127.0.0.1，不能把 Agent 端口直接暴露到公网，否则攻击者可以伪造任意用户身份。"
     },
     {
       "id": 1003,
       "name": "对象存储与上传设计.md",
       "source": "synthetic",
-      "text": "文件内容存放在 MinIO S3 兼容对象存储，Java 侧使用 AWS SDK v2 S3Client 和 path-style 寻址。普通直传限制为 50MB，分块上传每块 10MB，单文件上限为 10GB。MultipartController 负责初始化 upload、接收 part、记录 ETag，并在全部分块完成后调用 S3 complete multipart。大文件测试会使用上传会话标识 MPU-8R13 检查分块重试是否幂等。\n\n秒传只在同一个 owner 内按 MD5 查找已有文件，避免把一个用户的文件对象错误复用给另一个用户。命中秒传时不重新上传内容，而是使用 MinioStorage.copyObject 复制到新 object key，再创建新的文件元数据。跨用户不能通过全局 MD5 直接复用对象。\n\n文件删除包括数据库记录、对象存储对象和 Agent 索引三个部分。文件服务删除记录后通过 AgentNotifier 异步调用取消索引，文件夹级联删除也必须为每个后代文件发送取消索引通知。通知是尽力而为，但删除逻辑不能省略，否则已经删除的内容仍可能出现在语义检索结果中。"
+      "text": "文件内容存放在 MinIO S3 兼容对象存储，Go 侧使用 minio-go v7 和 path-style 寻址。普通直传限制为 50MB，分块上传每块 10MB，单文件上限为 10GB。Go 的 multipart 服务负责初始化 upload、接收 part、记录 ETag，并在全部分块完成后调用 MinIO complete multipart。大文件测试会使用上传会话标识 MPU-8R13 检查分块重试是否幂等。\n\n秒传只在同一个 owner 内按 MD5 查找已有文件，避免把一个用户的文件对象错误复用给另一个用户。命中秒传时不重新上传内容，而是使用对象存储适配器的 Copy 复制到新 object key，再创建新的文件元数据。跨用户不能通过全局 MD5 直接复用对象。\n\n文件删除包括数据库记录、对象存储对象和 Agent 索引三个部分。文件服务删除记录后通过索引通知服务异步调用取消索引，文件夹级联删除也必须为每个后代文件发送取消索引通知。通知是尽力而为，但删除逻辑不能省略，否则已经删除的内容仍可能出现在语义检索结果中。"
     },
     {
       "id": 1004,
@@ -48,7 +48,7 @@
       "id": 1008,
       "name": "测试与部署手册.md",
       "source": "synthetic",
-      "text": "本地基础设施由 Docker Compose 提供，包括 MySQL 8、Redis 7、MinIO 和 Qdrant。MinIO 容器的 API 映射到宿主机 9100，控制台映射到 9101；Qdrant REST 端口是 6333。Java 后端 dev profile 使用 localhost，生产 profile 使用 mysql、redis、minio:9000 和 agent:8000 等 Docker 服务名。CI 评估任务编号为 CI-2026-041，用于区分依赖基础设施的链路测试和 mock 单元测试。\n\nJava 后端使用 Maven，mvn test 依赖 H2 内存数据库，不要求启动 MySQL、Redis 或 MinIO；单个文件域测试可以使用 mvn test -Dtest=FileServiceTest。Agent 使用 pytest test/ 运行 mock 单元测试，test_memory.py、test_search.py 和 test_chain.py 是需要显式 python 执行的真实链路脚本。前端 npm run build 等价于 tsc -b && vite build。\n\n打包后端前要停止正在运行的 jar，因为 Windows 会锁定 target/backend-0.1.0.jar。启动验证使用后台 Start-Process 启动 Java，再轮询 /health，不要在终端前台阻塞等待。生产环境的 LLM 加密主密钥必须通过 CD_LLM_ENCRYPTION_KEY 提供。"
+      "text": "本地基础设施由 Docker Compose 提供，包括 MySQL 8、Redis 7、MinIO 和 Qdrant。MinIO 容器的 API 映射到宿主机 9100，控制台映射到 9101；Qdrant REST 端口是 6333。Go 后端使用 CD_* 环境变量配置，本地开发连 localhost，Docker 内连 mysql、redis、minio:9000 和 agent:8000 等服务名。CI 评估任务编号为 CI-2026-041，用于区分依赖基础设施的链路测试和 mock 单元测试。\n\nGo 后端使用标准库测试，go test 使用桩适配器，不要求启动 MySQL、Redis 或 MinIO；单个文件域测试可以使用 go test -run TestFile 指定。Agent 使用 pytest test/ 运行 mock 单元测试，test_memory.py、test_search.py 和 test_chain.py 是需要显式 python 执行的真实链路脚本。前端 npm run build 等价于 tsc -b && vite build。\n\n打包后端前要停止正在运行的 Go 二进制，因为 Windows 会锁定编译产物 cloud-drive.exe。启动验证使用后台 Start-Process 启动 Go 后端，再轮询 /health，不要在终端前台阻塞等待。生产环境的 LLM 加密主密钥必须通过 CD_LLM_ENCRYPTION_KEY 提供。"
     },
     {
       "id": 1009,
@@ -60,7 +60,7 @@
       "id": 1010,
       "name": "性能与可靠性复盘.md",
       "source": "synthetic",
-      "text": "文件夹批量建索引时使用并发信号量，最多同时处理 4 个文件，并限制单次请求最多索引 100 个文件。Qdrant upsert 按 128 个点分批写入，避免一次请求携带过大的 payload。Embedding 和 Cross-Encoder 模型采用异步锁懒加载，并把 CPU 推理放到 executor，避免阻塞 FastAPI 事件循环。\n\nJava AgentClient 使用 HTTP/1.1 访问明文 Agent，避免 Java HttpClient 默认 HTTP/2 触发 h2c upgrade。代理会跳过 host、connection、upgrade、content-length 和 expect 等受限或 hop-by-hop 头。Agent 并发超过上限返回 503，代理连接失败返回 502，SSE 流关闭时在 finally 中释放并发许可。\n\n向量搜索先取 rerank_candidates 个粗排候选，再交给 Cross-Encoder 精排，默认返回 top_k 个结果。重排失败时退回 ANN 结果，单个工具失败转换成错误字符串交给 LLM 决策，不让一个外部依赖异常中断整轮 Agent。"
+      "text": "文件夹批量建索引时使用并发信号量，最多同时处理 4 个文件，并限制单次请求最多索引 100 个文件。Qdrant upsert 按 128 个点分批写入，避免一次请求携带过大的 payload。Embedding 和 Cross-Encoder 模型采用异步锁懒加载，并把 CPU 推理放到 executor，避免阻塞 FastAPI 事件循环。\n\nGo agent 代理使用 HTTP/1.1 访问明文 Agent，传输层禁用 HTTP/2（ForceAttemptHTTP2=false），避免 h2c upgrade 问题。代理会跳过 host、connection、upgrade、content-length 和 expect 等受限或 hop-by-hop 头。Agent 并发超过上限返回 503，代理连接失败返回 502，SSE 流关闭时在 finally 中释放并发许可。\n\n向量搜索先取 rerank_candidates 个粗排候选，再交给 Cross-Encoder 精排，默认返回 top_k 个结果。重排失败时退回 ANN 结果，单个工具失败转换成错误字符串交给 LLM 决策，不让一个外部依赖异常中断整轮 Agent。"
     },
     {
       "id": 1011,
@@ -99,7 +99,7 @@
     }
   ],
   "queries": [
-    {"id": "exact-01", "type": "exact", "query": "Java HttpClient 为什么要使用 HTTP_1_1", "relevant_files": [1001, 1010]},
+    {"id": "exact-01", "type": "exact", "query": "Go 后端代理访问 Agent 时为什么使用 HTTP/1.1", "relevant_files": [1001, 1010]},
     {"id": "exact-02", "type": "exact", "query": "internal:agent:token 存在哪个 Redis 键", "relevant_files": [1002]},
     {"id": "exact-03", "type": "exact", "query": "用户 LLM 密钥使用什么算法加密", "relevant_files": [1002]},
     {"id": "exact-04", "type": "exact", "query": "直传文件的大小上限是多少", "relevant_files": [1003]},
