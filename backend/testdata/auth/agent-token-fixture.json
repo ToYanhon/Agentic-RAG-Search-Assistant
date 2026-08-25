@@ -1,7 +1,0 @@
-{
-  "redis_key": "internal:agent:token",
-  "token": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-  "token_bytes": 32,
-  "ttl_seconds": 1800,
-  "rotation_seconds": 900
-}

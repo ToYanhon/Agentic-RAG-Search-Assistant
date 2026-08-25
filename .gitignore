@@ -27,3 +27,6 @@ backend/.classpath
 backend/.project
 backend/.settings/
 backend/logs/
+
+# Go 后端已弃用（compose 已切换为 backend-java），仅保留本地文件，不入库
+backend/
