@@ -1,0 +1,19 @@
+<mxfile host="app.diagrams.net" modified="2026-08-16T00:00:00.000Z" agent="OpenCode" version="24.7.17" type="device">
+  <diagram id="request-auth" name="请求与认证">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1600" pageHeight="1000">
+      <root><mxCell id="0"/><mxCell id="1" parent="0"/>
+        <mxCell id="browser" value="浏览器&#xa;Bearer JWT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="40" y="250" width="170" height="80" as="geometry"/></mxCell>
+        <mxCell id="go" value="Go Backend&#xa;JWT middleware&#xa;owner 校验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="300" y="220" width="220" height="140" as="geometry"/></mxCell>
+        <mxCell id="agent" value="Python Agent&#xa;X-Agent-Token&#xa;X-User-Id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="620" y="220" width="220" height="140" as="geometry"/></mxCell>
+        <mxCell id="files" value="内部文件接口&#xa;Agent-only content read/write" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;" vertex="1" parent="1"><mxGeometry x="300" y="480" width="220" height="90" as="geometry"/></mxCell>
+        <mxCell id="sse" value="SSE stream&#xa;Go 透传给浏览器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e7ff;strokeColor=#4f46e5;" vertex="1" parent="1"><mxGeometry x="620" y="480" width="220" height="90" as="geometry"/></mxCell>
+        <mxCell id="e1" value="1. /api/v1&#xa;Authorization: Bearer" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="browser" target="go"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" value="2. 校验 JWT&#xa;确定 owner_id" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="go" target="go"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" value="3. 受控代理&#xa;注入 token + user id" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="go" target="agent"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" value="4. 回访时必须带内部认证" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="agent" target="files"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" value="5. SSE 结果" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="agent" target="sse"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e6" value="6. 透传" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="sse" target="browser"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

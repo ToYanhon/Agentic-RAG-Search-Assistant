@@ -1,0 +1,46 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram id="data-model" name="数据分层">
+    <mxGraphModel dx="1351" dy="1014" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="owner" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontStyle=1;" value="Owner&#xa;user_id" vertex="1">
+          <mxGeometry height="90" width="170" x="50" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="catalog" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;" value="MySQL 元数据&#xa;users&#xa;folders / files&#xa;shares / llm_configs" vertex="1">
+          <mxGeometry height="190" width="250" x="330" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="objects" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8ff;strokeColor=#9333ea;" value="MinIO&#xa;文件对象&#xa;owner 隔离的 object key" vertex="1">
+          <mxGeometry height="130" width="250" x="330" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="redis" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;" value="Redis&#xa;缓存 / 黑名单&#xa;multipart / index queue" vertex="1">
+          <mxGeometry height="150" width="250" x="750" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="index" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e7ff;strokeColor=#4f46e5;" value="Qdrant&#xa;文件向量与稀疏索引&#xa;payload: user_id, file_id" vertex="1">
+          <mxGeometry height="150" width="250" x="750" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="security" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontStyle=1;" value="安全边界&#xa;JWT owner 校验&#xa;Agent token&#xa;AES-GCM LLM 密钥" vertex="1">
+          <mxGeometry height="170" width="230" x="1130" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="owner" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" target="catalog" value="owner_id">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="catalog" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" target="objects" value="object key 映射">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="catalog" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" target="redis" value="认证与临时状态">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="redis" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" target="index" value="索引通知">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="security" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" target="catalog" value="所有访问必须经过">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="security" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" target="index" value="owner filter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

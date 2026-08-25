@@ -1,0 +1,52 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram id="system-architecture" name="系统架构">
+    <mxGraphModel dx="1113" dy="835" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="frontend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontStyle=1;" value="Frontend&#xa;React 18&#xa;:3000 / :5173" vertex="1">
+          <mxGeometry height="90" width="180" x="40" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="backend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontStyle=1;" value="Backend&#xa;Java Spring Boot&#xa;:8080" vertex="1">
+          <mxGeometry height="130" width="210" x="300" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;fontStyle=1;" value="Agent&#xa;Python FastAPI&#xa;:8000&#xa;仅后端访问" vertex="1">
+          <mxGeometry height="130" width="210" x="600" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="mysql" parent="1" style="shape=cylinder;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#f3e8ff;strokeColor=#9333ea;" value="MySQL 8&#xa;元数据" vertex="1">
+          <mxGeometry height="90" width="160" x="930" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="redis" parent="1" style="shape=cylinder;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#f3e8ff;strokeColor=#9333ea;" value="Redis 7&#xa;缓存 / 队列 / 认证" vertex="1">
+          <mxGeometry height="90" width="160" x="930" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="minio" parent="1" style="shape=cylinder;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#f3e8ff;strokeColor=#9333ea;" value="MinIO&#xa;对象存储" vertex="1">
+          <mxGeometry height="90" width="160" x="930" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="qdrant" parent="1" style="shape=cylinder;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#f3e8ff;strokeColor=#9333ea;" value="Qdrant&#xa;向量索引" vertex="1">
+          <mxGeometry height="90" width="160" x="930" y="460" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="frontend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" target="backend" value="/api/v1&#xa;Bearer JWT">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="backend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" target="agent" value="SSE / 内部文件接口&#xa;Agent token">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="backend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" target="mysql" value="元数据">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="backend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" target="redis" value="缓存 / 通知">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="backend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" target="minio" value="对象">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="agent" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" target="qdrant" value="向量 / payload user_id">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="agent" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;" target="redis" value="索引队列">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

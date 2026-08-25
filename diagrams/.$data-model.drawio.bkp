@@ -1,0 +1,20 @@
+<mxfile host="app.diagrams.net" modified="2026-08-16T00:00:00.000Z" agent="OpenCode" version="24.7.17" type="device">
+  <diagram id="data-model" name="数据分层">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1600" pageHeight="1000">
+      <root><mxCell id="0"/><mxCell id="1" parent="0"/>
+        <mxCell id="owner" value="Owner&#xa;user_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="50" y="260" width="170" height="90" as="geometry"/></mxCell>
+        <mxCell id="catalog" value="MySQL 元数据&#xa;users&#xa;folders / files&#xa;shares / llm_configs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;" vertex="1" parent="1"><mxGeometry x="330" y="100" width="250" height="190" as="geometry"/></mxCell>
+        <mxCell id="objects" value="MinIO&#xa;文件对象&#xa;owner 隔离的 object key" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8ff;strokeColor=#9333ea;" vertex="1" parent="1"><mxGeometry x="330" y="390" width="250" height="130" as="geometry"/></mxCell>
+        <mxCell id="redis" value="Redis&#xa;缓存 / 黑名单&#xa;multipart / index queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;" vertex="1" parent="1"><mxGeometry x="750" y="100" width="250" height="150" as="geometry"/></mxCell>
+        <mxCell id="index" value="Qdrant&#xa;文件向量与稀疏索引&#xa;payload: user_id, file_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e7ff;strokeColor=#4f46e5;" vertex="1" parent="1"><mxGeometry x="750" y="390" width="250" height="150" as="geometry"/></mxCell>
+        <mxCell id="security" value="安全边界&#xa;JWT owner 校验&#xa;Agent token&#xa;AES-GCM LLM 密钥" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1130" y="220" width="230" height="170" as="geometry"/></mxCell>
+        <mxCell id="e1" value="owner_id" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="owner" target="catalog"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" value="object key 映射" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="catalog" target="objects"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" value="认证与临时状态" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="catalog" target="redis"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" value="索引通知" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="redis" target="index"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" value="所有访问必须经过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="security" target="catalog"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e6" value="owner filter" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="security" target="index"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

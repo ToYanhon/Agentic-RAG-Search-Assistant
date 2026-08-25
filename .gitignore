@@ -10,7 +10,6 @@ __pycache__/
 DESIGN.md
 logs/
 docs/
-diagrams/
 
 # 本地迁移规划，不纳入版本库
 spec/
