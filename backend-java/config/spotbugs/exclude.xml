@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- EI_EXPOSE_REP / EI_EXPOSE_REP2：Spring 构造器注入外部依赖 + 不可变 record 访问器，
+         属 SpotBugs 对 DI 与 record 的经典误报（字段为 final 且对象由容器管理）。 -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- NM_SAME_SIMPLE_NAME_AS_SUPERCLASS：file.Record / share.Record 为 Go struct 名直译，
+         包内使用无歧义，不影响编译与运行时行为。 -->
+    <Match>
+        <Bug pattern="NM_SAME_SIMPLE_NAME_AS_SUPERCLASS"/>
+    </Match>
+
+    <!-- CT_CONSTRUCTOR_THROW：Bean 工厂构造时对配置做校验性抛出（与 Go NewXxx 返回 error 对齐），
+         对象由 Spring 一次性创建，无 finalizer 攻击面。 -->
+    <Match>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+
+    <!-- PZLA_PREFER_ZERO_LENGTH_ARRAYS：null 作为「无合法 Range/超限」哨兵（对应 Go 返回 nil），
+         语义明确且与 Go 契约一致。 -->
+    <Match>
+        <Bug pattern="PZLA_PREFER_ZERO_LENGTH_ARRAYS"/>
+    </Match>
+
+    <!-- DE_MIGHT_IGNORE：索引通知重排失败为尽力而为（对应 Go 的 _ = json.Marshal），
+         与「通知失败不阻塞主流程」的既定语义一致。 -->
+    <Match>
+        <Bug pattern="DE_MIGHT_IGNORE"/>
+    </Match>
+</FindBugsFilter>

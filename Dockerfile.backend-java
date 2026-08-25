@@ -1,0 +1,13 @@
+# CloudDrive AI 后端（Java Spring Boot）多阶段构建
+FROM maven:3.9-eclipse-temurin-21 AS builder
+WORKDIR /app
+COPY backend-java/pom.xml .
+RUN mvn -q -B dependency:go-offline
+COPY backend-java/src ./src
+RUN mvn -q -B -DskipTests package
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder /app/target/cloud-drive-backend.jar ./cloud-drive-backend.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/cloud-drive-backend.jar"]

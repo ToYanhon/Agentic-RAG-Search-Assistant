@@ -3,9 +3,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   listFiles, uploadFileWithProgress, deleteFile, getDownloadUrl, renameFile, moveFile,
-  checksumFile, initMultipart, uploadPart, completeMultipart, abortMultipart, searchFiles,
+  checksumFile, initMultipart, uploadPart, completeMultipart, searchFiles,
 } from '../api/files'
-import { indexFile, indexFolder, getIndexStatus, unindexFile, getFolderIndexStatus, unindexFolder } from '../api/agent'
+import { indexFile, indexFolder, getIndexStatus, unindexFile, unindexFolder } from '../api/agent'
 import { getRootFolders, createFolder, deleteFolder, renameFolder, moveFolder } from '../api/folders'
 import { getProfile } from '../api/auth'
 import { createShare, deleteShare } from '../api/shares'
@@ -154,7 +154,7 @@ export default function Dashboard() {
       if (done) { onSetProgress(100); return done }
     } catch { /* 分块未齐，继续补传 */ }
 
-    let done = false
+    const done = false
     let attempt = 0
     while (!done && attempt < 3) {
       attempt += 1

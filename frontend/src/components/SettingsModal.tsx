@@ -50,7 +50,7 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
   const [tab, setTab] = useState<Tab>('profile')
 
   // 个人资料
-  const [profile, setProfile] = useState<User | null>(null)
+  const [, setProfile] = useState<User | null>(null)
   const [username, setUsername] = useState('')
   const [profileMsg, setProfileMsg] = useState<Msg | null>(null)
   // 修改密码

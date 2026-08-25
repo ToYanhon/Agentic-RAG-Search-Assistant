@@ -55,15 +55,17 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile.backend-java
     ports:
       - "8080:8080"
     environment:
       APP_MODE: prod
-      # Go 后端配置（prod 必须提供 LLM 加密主密钥 ≥32B；JWT secret 可覆盖）
+      # Java/Spring Boot 后端（Dockerfile.backend-java；prod 必须提供 LLM 加密主密钥 ≥32B；JWT secret 可覆盖）
       CD_LLM_ENCRYPTION_KEY: ${CD_LLM_ENCRYPTION_KEY:-dev-only-llm-encryption-key-change-me-32b}
       CD_JWT_SECRET: ${CD_JWT_SECRET:-change-me-in-production}
-      CD_MYSQL_DSN: root:root@tcp(mysql:3306)/cloud_drive?parseTime=true&loc=Asia%2FShanghai
+      CD_MYSQL_DSN: jdbc:mysql://mysql:3306/cloud_drive?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      CD_MYSQL_USER: root
+      CD_MYSQL_PASSWORD: root
       CD_REDIS_ADDR: redis:6379
       CD_MINIO_ENDPOINT: minio:9000
       CD_AGENT_BASE_URL: http://agent:8000

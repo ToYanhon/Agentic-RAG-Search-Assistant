@@ -357,7 +357,6 @@ export default function Copilot({ open, onClose, selected, summaryRequest, onSum
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, summaryRequest?.nonce])
 
-  const actions = selected.length > 0 ? quickActionsFor(selected[0]) : []
   const sendQuick = (a: { key: string; prompt: string }) => {
     if (a.key === 'sum') {
       runSummary(selected[0])
