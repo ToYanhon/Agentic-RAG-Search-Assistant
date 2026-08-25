@@ -11,6 +11,9 @@ DESIGN.md
 logs/
 docs/
 
+# draw.io 自动备份
+diagrams/.$*.bkp
+
 # 本地迁移规划，不纳入版本库
 spec/
 
